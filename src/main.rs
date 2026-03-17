@@ -16,7 +16,7 @@ use ratatui::{DefaultTerminal, Frame};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WordItem {
     term: String,
     meaning_ko: String,
@@ -80,7 +80,9 @@ struct QuizQuestion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
-    Config,
+    ApiKeySetup,
+    Main,
+    TopicCreate,
     Loading,
     Study,
     Quiz,
@@ -96,13 +98,28 @@ enum InputField {
 }
 
 impl InputField {
-    fn next(self) -> Self {
+    fn next_for_topic_create(self) -> Self {
         match self {
-            InputField::ApiKey => InputField::Topic,
             InputField::Topic => InputField::Count,
-            InputField::Count => InputField::ApiKey,
+            _ => InputField::Topic,
         }
     }
+}
+
+#[derive(Debug)]
+struct GenerationResult {
+    topic: String,
+    count: usize,
+    words: Vec<WordItem>,
+}
+
+#[derive(Debug, Clone)]
+struct TopicRecord {
+    topic: String,
+    count: usize,
+    words: Vec<WordItem>,
+    last_score: Option<(usize, usize)>,
+    passed: bool,
 }
 
 #[derive(Debug)]
@@ -112,6 +129,9 @@ struct App {
     api_key: String,
     topic: String,
     count_text: String,
+    topic_history: Vec<TopicRecord>,
+    selected_topic: usize,
+    active_topic: Option<usize>,
     words: Vec<WordItem>,
     study_index: usize,
     quiz_questions: Vec<QuizQuestion>,
@@ -124,19 +144,23 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let api_key = String::new();
         Self {
-            screen: Screen::Config,
+            screen: Screen::ApiKeySetup,
             focused: InputField::ApiKey,
-            api_key: String::new(),
+            api_key,
             topic: "daily conversation".to_string(),
             count_text: "10".to_string(),
+            topic_history: Vec::new(),
+            selected_topic: 0,
+            active_topic: None,
             words: Vec::new(),
             study_index: 0,
             quiz_questions: Vec::new(),
             quiz_index: 0,
             selected_option: 0,
             score: 0,
-            message: "Tab으로 이동, Enter로 단어 생성".to_string(),
+            message: "API Key를 입력하고 Enter를 누르세요".to_string(),
             quit: false,
         }
     }
@@ -163,6 +187,139 @@ impl App {
         self.message = "Enter: 다음 단어, Q: 퀴즈 시작".to_string();
     }
 
+    fn setup_api_key(&mut self) {
+        let normalized = self.api_key.trim().to_string();
+        if normalized.is_empty() {
+            self.message = "API Key를 입력해 주세요".to_string();
+            return;
+        }
+        self.api_key = normalized;
+        self.screen = Screen::Main;
+        self.message = "N: 새 주제 생성, S: 학습, Q: 시험".to_string();
+        self.focused = InputField::Topic;
+    }
+
+    fn handle_api_key_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Backspace => {
+                self.api_key.pop();
+            }
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.api_key.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_topic_create_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab => self.focused = self.focused.next_for_topic_create(),
+            KeyCode::Backspace => match self.focused {
+                InputField::Topic => {
+                    self.topic.pop();
+                }
+                InputField::Count => {
+                    self.count_text.pop();
+                }
+                InputField::ApiKey => {}
+            },
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return;
+                }
+                match self.focused {
+                    InputField::Topic => self.topic.push(c),
+                    InputField::Count => {
+                        if c.is_ascii_digit() {
+                            self.count_text.push(c);
+                        }
+                    }
+                    InputField::ApiKey => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn topic_count(&self) -> usize {
+        self.topic_history.len()
+    }
+
+    fn move_topic_selection(&mut self, delta: isize) {
+        let len = self.topic_count();
+        if len == 0 {
+            self.selected_topic = 0;
+            return;
+        }
+        let current = self.selected_topic.min(len - 1) as isize;
+        let next = (current + delta).clamp(0, (len - 1) as isize) as usize;
+        self.selected_topic = next;
+    }
+
+    fn normalize_selection(&mut self) {
+        if self.topic_history.is_empty() {
+            self.selected_topic = 0;
+            self.active_topic = None;
+            return;
+        }
+        self.selected_topic = self.selected_topic.min(self.topic_history.len() - 1);
+    }
+
+    fn save_topic(&mut self, topic: String, count: usize, words: Vec<WordItem>) -> usize {
+        self.topic_history.push(TopicRecord {
+            topic,
+            count,
+            words,
+            last_score: None,
+            passed: false,
+        });
+        let index = self.topic_history.len() - 1;
+        self.selected_topic = index;
+        index
+    }
+
+    fn start_study_for(&mut self, index: usize) {
+        if let Some(words) = self.topic_history.get(index).map(|record| record.words.clone()) {
+            self.active_topic = Some(index);
+            self.start_study(words);
+        }
+    }
+
+    fn start_quiz_for(&mut self, index: usize) {
+        if let Some(words) = self.topic_history.get(index).map(|record| record.words.clone()) {
+            self.active_topic = Some(index);
+            self.words = words;
+            self.start_quiz();
+        }
+    }
+
+    fn finish_quiz(&mut self) {
+        if let Some(active) = self.active_topic {
+            let total = self.quiz_questions.len();
+            if total > 0 {
+                let passed = self.score * 100 >= total * 70;
+                if let Some(record) = self.topic_history.get_mut(active) {
+                    record.last_score = Some((self.score, total));
+                    record.passed = passed;
+                }
+            }
+        }
+        self.screen = Screen::Result;
+        self.message = "M: 메인, S: 학습, Q: 시험, Esc: 종료".to_string();
+    }
+
+    fn start_main(&mut self) {
+        self.normalize_selection();
+        self.screen = Screen::Main;
+        self.message = "N: 새 주제 생성, S: 학습, Q: 시험, Enter: 학습".to_string();
+    }
+
+    fn selected_topic_record(&self) -> Option<&TopicRecord> {
+        self.topic_history.get(self.selected_topic)
+    }
+
     fn start_quiz(&mut self) {
         self.quiz_questions = build_quiz_questions(&self.words);
         self.quiz_index = 0;
@@ -184,47 +341,8 @@ impl App {
             self.quiz_index += 1;
             self.selected_option = 0;
             if self.quiz_index >= self.quiz_questions.len() {
-                self.screen = Screen::Result;
-                self.message = "R: 다시 시작, Q: 종료".to_string();
+                self.finish_quiz();
             }
-        }
-    }
-
-    fn reset(&mut self) {
-        let api_key = self.api_key.clone();
-        *self = Self::default();
-        self.api_key = api_key;
-    }
-
-    fn handle_config_input(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Tab => self.focused = self.focused.next(),
-            KeyCode::Backspace => match self.focused {
-                InputField::ApiKey => {
-                    self.api_key.pop();
-                }
-                InputField::Topic => {
-                    self.topic.pop();
-                }
-                InputField::Count => {
-                    self.count_text.pop();
-                }
-            },
-            KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return;
-                }
-                match self.focused {
-                    InputField::ApiKey => self.api_key.push(c),
-                    InputField::Topic => self.topic.push(c),
-                    InputField::Count => {
-                        if c.is_ascii_digit() {
-                            self.count_text.push(c);
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -239,7 +357,7 @@ async fn main() -> Result<()> {
 
 async fn run(mut terminal: DefaultTerminal) -> Result<()> {
     let mut app = App::default();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Vec<WordItem>>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Result<GenerationResult>>();
 
     while !app.quit {
         terminal.draw(|frame| draw(frame, &app))?;
@@ -247,7 +365,10 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
         if app.screen == Screen::Loading {
             match rx.try_recv() {
                 Ok(result) => match result {
-                    Ok(words) => app.start_study(words),
+                    Ok(output) => {
+                        let index = app.save_topic(output.topic, output.count, output.words);
+                        app.start_study_for(index);
+                    }
                     Err(err) => {
                         app.screen = Screen::Error;
                         app.message = format!("생성 실패: {err}");
@@ -274,7 +395,7 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
 async fn handle_key_event(
     key: KeyEvent,
     app: &mut App,
-    tx: &mpsc::UnboundedSender<Result<Vec<WordItem>>>,
+    tx: &mpsc::UnboundedSender<Result<GenerationResult>>,
 ) {
     if key.code == KeyCode::Esc {
         app.quit = true;
@@ -282,13 +403,39 @@ async fn handle_key_event(
     }
 
     match app.screen {
-        Screen::Config => match key.code {
+        Screen::ApiKeySetup => match key.code {
+            KeyCode::Enter => {
+                app.setup_api_key();
+            }
+            _ => app.handle_api_key_input(key),
+        },
+        Screen::Main => match key.code {
+            KeyCode::Up => app.move_topic_selection(-1),
+            KeyCode::Down => app.move_topic_selection(1),
+            KeyCode::Enter | KeyCode::Char('s') | KeyCode::Char('S') => {
+                if app.selected_topic_record().is_some() {
+                    app.start_study_for(app.selected_topic);
+                } else {
+                    app.screen = Screen::TopicCreate;
+                    app.focused = InputField::Topic;
+                    app.message = "새 주제를 입력하세요".to_string();
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                if app.selected_topic_record().is_some() {
+                    app.start_quiz_for(app.selected_topic);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.screen = Screen::TopicCreate;
+                app.focused = InputField::Topic;
+                app.message = "주제 입력 후 Enter: 단어 생성".to_string();
+            }
+            _ => {}
+        },
+        Screen::TopicCreate => match key.code {
             KeyCode::Enter => {
                 let topic = app.topic.trim().to_string();
-                if app.api_key.trim().is_empty() {
-                    app.message = "API Key를 입력해 주세요".to_string();
-                    return;
-                }
                 if topic.is_empty() {
                     app.message = "주제를 입력해 주세요".to_string();
                     return;
@@ -300,6 +447,12 @@ async fn handle_key_event(
                         return;
                     }
                 };
+                if app.api_key.trim().is_empty() {
+                    app.screen = Screen::ApiKeySetup;
+                    app.focused = InputField::ApiKey;
+                    app.message = "API Key를 먼저 설정해 주세요".to_string();
+                    return;
+                }
 
                 app.screen = Screen::Loading;
                 app.message = "OpenAI에서 단어를 생성하는 중...".to_string();
@@ -307,11 +460,16 @@ async fn handle_key_event(
                 let api_key = app.api_key.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = fetch_words(&api_key, &topic, count).await;
+                    let result = fetch_words(&api_key, &topic, count).await.map(|words| GenerationResult {
+                        topic,
+                        count,
+                        words,
+                    });
                     let _ = tx.send(result);
                 });
             }
-            _ => app.handle_config_input(key),
+            KeyCode::Char('m') | KeyCode::Char('M') => app.start_main(),
+            _ => app.handle_topic_create_input(key),
         },
         Screen::Loading => {}
         Screen::Study => match key.code {
@@ -342,12 +500,28 @@ async fn handle_key_event(
             _ => {}
         },
         Screen::Result => match key.code {
-            KeyCode::Char('r') | KeyCode::Char('R') => app.reset(),
-            KeyCode::Char('q') | KeyCode::Char('Q') => app.quit = true,
+            KeyCode::Char('m') | KeyCode::Char('M') => app.start_main(),
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if let Some(active) = app.active_topic {
+                    app.start_study_for(active);
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                if let Some(active) = app.active_topic {
+                    app.start_quiz_for(active);
+                }
+            }
             _ => {}
         },
         Screen::Error => match key.code {
-            KeyCode::Char('r') | KeyCode::Char('R') => app.screen = Screen::Config,
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if app.api_key.trim().is_empty() {
+                    app.screen = Screen::ApiKeySetup;
+                    app.focused = InputField::ApiKey;
+                } else {
+                    app.start_main();
+                }
+            }
             KeyCode::Char('q') | KeyCode::Char('Q') => app.quit = true,
             _ => {}
         },
@@ -356,7 +530,9 @@ async fn handle_key_event(
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.screen {
-        Screen::Config => draw_config(frame, app),
+        Screen::ApiKeySetup => draw_api_key_setup(frame, app),
+        Screen::Main => draw_main(frame, app),
+        Screen::TopicCreate => draw_topic_create(frame, app),
         Screen::Loading => draw_loading(frame, app),
         Screen::Study => draw_study(frame, app),
         Screen::Quiz => draw_quiz(frame, app),
@@ -365,14 +541,12 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn draw_config(frame: &mut Frame<'_>, app: &App) {
+fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(4),
             Constraint::Min(1),
         ])
         .margin(2)
@@ -384,7 +558,7 @@ fn draw_config(frame: &mut Frame<'_>, app: &App) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL).title("Title"));
+        .block(Block::default().borders(Borders::ALL).title("API Key Setup"));
 
     let api_value = if app.api_key.is_empty() {
         "(input your OpenAI API key)".to_string()
@@ -399,6 +573,100 @@ fn draw_config(frame: &mut Frame<'_>, app: &App) {
     let api = Paragraph::new(api_value)
         .style(api_style)
         .block(Block::default().borders(Borders::ALL).title("API Key"));
+
+    let help = Paragraph::new(vec![
+        Line::from("Enter: API Key 저장 후 메인 이동"),
+        Line::from("Esc: 종료"),
+        Line::from(app.message.clone()),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Help"))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(title, areas[0]);
+    frame.render_widget(api, areas[1]);
+    frame.render_widget(help, areas[2]);
+}
+
+fn draw_main(frame: &mut Frame<'_>, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .margin(2)
+        .split(frame.area());
+
+    let title = Paragraph::new("Main Menu")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL).title("English Vocab TUI"));
+
+    let items: Vec<ListItem<'_>> = if app.topic_history.is_empty() {
+        vec![ListItem::new("저장된 주제가 없습니다. N으로 새 주제를 생성하세요.")]
+    } else {
+        app.topic_history
+            .iter()
+            .enumerate()
+            .map(|(idx, record)| {
+                let status = if record.passed { "passed" } else { "in progress" };
+                let score = record
+                    .last_score
+                    .map(|(value, total)| format!("  score: {value}/{total}"))
+                    .unwrap_or_default();
+                let line = format!(
+                    "{}topic: {}  words: {}  status: {}{}",
+                    if idx == app.selected_topic { "> " } else { "  " },
+                    record.topic,
+                    record.count,
+                    status,
+                    score
+                );
+                ListItem::new(line)
+            })
+            .collect()
+    };
+
+    let topic_list = List::new(items).block(Block::default().borders(Borders::ALL).title("Review Topics"));
+
+    let help = Paragraph::new(vec![
+        Line::from("N: 새 주제 생성"),
+        Line::from("Up/Down: 과거 주제 선택"),
+        Line::from("S/Enter: 단어 학습 시작, Q: 시험 보기"),
+        Line::from("Esc: 종료"),
+        Line::from(app.message.clone()),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Actions"))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(title, chunks[0]);
+    frame.render_widget(topic_list, chunks[1]);
+    frame.render_widget(help, chunks[2]);
+}
+
+fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Min(1),
+        ])
+        .margin(2)
+        .split(frame.area());
+
+    let title = Paragraph::new("새 주제 생성")
+        .style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL).title("Create Topic"));
 
     let topic_style = if matches!(app.focused, InputField::Topic) {
         Style::default().fg(Color::Yellow)
@@ -423,8 +691,9 @@ fn draw_config(frame: &mut Frame<'_>, app: &App) {
         );
 
     let help = Paragraph::new(vec![
-        Line::from("Tab: 입력 필드 이동"),
+        Line::from("Tab: Topic/Count 이동"),
         Line::from("Enter: 단어 생성 시작"),
+        Line::from("M: 메인으로 이동"),
         Line::from("Esc: 종료"),
         Line::from(app.message.clone()),
     ])
@@ -432,10 +701,9 @@ fn draw_config(frame: &mut Frame<'_>, app: &App) {
     .wrap(Wrap { trim: true });
 
     frame.render_widget(title, areas[0]);
-    frame.render_widget(api, areas[1]);
-    frame.render_widget(topic, areas[2]);
-    frame.render_widget(count, areas[3]);
-    frame.render_widget(help, areas[4]);
+    frame.render_widget(topic, areas[1]);
+    frame.render_widget(count, areas[2]);
+    frame.render_widget(help, areas[3]);
 }
 
 fn draw_loading(frame: &mut Frame<'_>, app: &App) {
@@ -586,8 +854,10 @@ fn draw_result(frame: &mut Frame<'_>, app: &App) {
         Line::from(format!("정답: {}/{}", app.score, app.quiz_questions.len())),
         Line::from(format!("정답률: {:.1}%", rate)),
         Line::from(" "),
-        Line::from("R: 처음으로 돌아가기"),
-        Line::from("Q: 종료"),
+        Line::from("M: 메인으로 이동"),
+        Line::from("S: 다시 학습하기"),
+        Line::from("Q: 다시 시험보기"),
+        Line::from("Esc: 종료"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Result"))
     .wrap(Wrap { trim: true });
@@ -602,7 +872,7 @@ fn draw_error(frame: &mut Frame<'_>, app: &App) {
     let text = Paragraph::new(vec![
         Line::from(app.message.clone()),
         Line::from(" "),
-        Line::from("R: 설정 화면으로 돌아가기"),
+        Line::from("R: 돌아가기"),
         Line::from("Q: 종료"),
     ])
     .style(Style::default().fg(Color::Red))
