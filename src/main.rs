@@ -1,5 +1,8 @@
 use std::collections::HashSet;
-use std::io;
+use std::env;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -132,18 +135,30 @@ impl InputField {
 #[derive(Debug)]
 struct GenerationResult {
     topic: String,
-    count: usize,
     words: Vec<WordItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TopicRecord {
     topic: String,
-    count: usize,
     words: Vec<WordItem>,
     last_score: Option<(usize, usize)>,
     passed: bool,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedState {
+    version: u8,
+    profile_name: String,
+    total_xp: u32,
+    english_skill: u32,
+    topic_history: Vec<TopicRecord>,
+    selected_topic: usize,
+}
+
+const STATE_VERSION: u8 = 2;
+const STATE_DIR_NAME: &str = "vocab_tui";
+const STATE_FILE_NAME: &str = "state.bin";
 
 #[derive(Debug)]
 struct App {
@@ -202,6 +217,58 @@ impl Default for App {
 impl App {
     fn add_xp(&mut self, xp: u32) {
         self.total_xp = self.total_xp.saturating_add(xp);
+    }
+
+    fn save_persisted_state(&self) -> Result<()> {
+        let path = state_file_path()?;
+        let state = PersistedState {
+            version: STATE_VERSION,
+            profile_name: self.profile_name.clone(),
+            total_xp: self.total_xp,
+            english_skill: self.english_skill,
+            topic_history: self.topic_history.clone(),
+            selected_topic: self
+                .selected_topic
+                .min(self.topic_history.len().saturating_sub(1)),
+        };
+        let bytes = bincode::serde::encode_to_vec(&state, bincode::config::standard())
+            .context("학습 상태 직렬화 실패")?;
+        atomic_write(&path, &bytes).context("학습 상태 파일 저장 실패")
+    }
+
+    fn load_persisted_state(&mut self) -> Result<bool> {
+        let path = state_file_path()?;
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let bytes = fs::read(&path).context("학습 상태 파일 읽기 실패")?;
+        let (state, used): (PersistedState, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .context("학습 상태 파일 파싱 실패")?;
+        if used != bytes.len() {
+            bail!("학습 상태 파일 끝에 불필요한 데이터가 있습니다");
+        }
+
+        if state.version != STATE_VERSION {
+            bail!(
+                "지원하지 않는 상태 버전입니다: {}, 기대값: {}",
+                state.version,
+                STATE_VERSION
+            );
+        }
+
+        self.profile_name = state.profile_name;
+        self.total_xp = state.total_xp;
+        self.english_skill = state.english_skill;
+        self.topic_history = state.topic_history;
+        if self.topic_history.is_empty() {
+            self.selected_topic = 0;
+        } else {
+            self.selected_topic = state.selected_topic.min(self.topic_history.len() - 1);
+        }
+
+        Ok(true)
     }
 
     fn parse_count(&self) -> Result<usize> {
@@ -304,16 +371,18 @@ impl App {
         self.selected_topic = self.selected_topic.min(self.topic_history.len() - 1);
     }
 
-    fn save_topic(&mut self, topic: String, count: usize, words: Vec<WordItem>) -> usize {
+    fn save_topic(&mut self, topic: String, words: Vec<WordItem>) -> usize {
         self.topic_history.push(TopicRecord {
             topic,
-            count,
             words,
             last_score: None,
             passed: false,
         });
         let index = self.topic_history.len() - 1;
         self.selected_topic = index;
+        if let Err(err) = self.save_persisted_state() {
+            self.message = format!("학습 상태 저장 실패: {err}");
+        }
         index
     }
 
@@ -353,6 +422,9 @@ impl App {
             }
         }
         self.screen = Screen::Result;
+        if let Err(err) = self.save_persisted_state() {
+            self.message = format!("학습 상태 저장 실패: {err}");
+        }
     }
 
     fn start_main(&mut self) {
@@ -454,6 +526,19 @@ async fn main() -> Result<()> {
 
 async fn run(mut terminal: DefaultTerminal) -> Result<()> {
     let mut app = App::default();
+    match app.load_persisted_state() {
+        Ok(true) => {
+            app.screen = Screen::Main;
+            app.focused = InputField::Topic;
+            app.message =
+                "이전 학습 기록을 불러왔습니다. N으로 새 주제 생성 시 API Key를 입력해 주세요"
+                    .to_string();
+        }
+        Ok(false) => {}
+        Err(err) => {
+            app.message = format!("저장된 학습 기록을 불러오지 못했습니다: {err}");
+        }
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Result<GenerationResult>>();
 
     while !app.quit {
@@ -463,7 +548,7 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
             match rx.try_recv() {
                 Ok(result) => match result {
                     Ok(output) => {
-                        let index = app.save_topic(output.topic, output.count, output.words);
+                        let index = app.save_topic(output.topic, output.words);
                         app.start_study_for(index);
                     }
                     Err(err) => {
@@ -484,6 +569,10 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 handle_key_event(key, &mut app, &tx).await;
             }
         }
+    }
+
+    if let Err(err) = app.save_persisted_state() {
+        app.message = format!("학습 상태 저장 실패: {err}");
     }
 
     Ok(())
@@ -561,11 +650,7 @@ async fn handle_key_event(
                 tokio::spawn(async move {
                     let result = fetch_words(&api_key, &topic, count, &excluded_terms, english_skill)
                         .await
-                        .map(|words| GenerationResult {
-                            topic,
-                            count,
-                            words,
-                        });
+                        .map(|words| GenerationResult { topic, words });
                     let _ = tx.send(result);
                 });
             }
@@ -579,6 +664,9 @@ async fn handle_key_event(
                     app.study_index += 1;
                 } else {
                     app.add_xp(10);
+                    if let Err(err) = app.save_persisted_state() {
+                        app.message = format!("학습 상태 저장 실패: {err}");
+                    }
                     app.start_quiz();
                 }
             }
@@ -759,7 +847,7 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
                     "{}topic: {}  words: {}  status: {}{}",
                     if idx == app.selected_topic { "> " } else { "  " },
                     record.topic,
-                    record.count,
+                    record.words.len(),
                     status,
                     score
                 );
@@ -1441,6 +1529,38 @@ async fn fetch_words_batch(
         );
     }
     Ok(payload.words)
+}
+
+fn state_file_path() -> Result<PathBuf> {
+    let base_dir = if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
+        PathBuf::from(xdg_data_home)
+    } else if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home).join(".local").join("share")
+    } else {
+        bail!("상태 저장 경로를 확인할 수 없습니다(HOME/XDG_DATA_HOME 없음)")
+    };
+
+    Ok(base_dir.join(STATE_DIR_NAME).join(STATE_FILE_NAME))
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("상태 저장 경로가 올바르지 않습니다"))?;
+    fs::create_dir_all(parent).context("상태 저장 디렉터리 생성 실패")?;
+
+    let tmp_path = path.with_extension("tmp");
+    {
+        let mut tmp_file = fs::File::create(&tmp_path).context("임시 상태 파일 생성 실패")?;
+        tmp_file
+            .write_all(bytes)
+            .context("임시 상태 파일 쓰기 실패")?;
+        tmp_file.sync_all().context("임시 상태 파일 동기화 실패")?;
+    }
+    fs::rename(&tmp_path, path).context("상태 파일 교체 실패")?;
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .context("상태 파일 디렉터리 동기화 실패")
 }
 
 fn setup_terminal() -> Result<DefaultTerminal> {
