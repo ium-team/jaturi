@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
@@ -8,9 +9,10 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use rand::seq::SliceRandom;
+use rand::Rng;
 use ratatui::layout::{Constraint, Direction, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use serde::{Deserialize, Serialize};
@@ -20,8 +22,6 @@ use tokio::sync::mpsc;
 struct WordItem {
     term: String,
     meaning_ko: String,
-    example_en: String,
-    example_ko: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,10 +72,33 @@ struct ChatMessageResponse {
 }
 
 #[derive(Debug, Clone)]
+enum QuizAnswer {
+    Choice(usize),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QuizType {
+    MeaningChoice,
+    FillBlankChoice,
+    SpellingWrite,
+}
+
+#[derive(Debug, Clone)]
 struct QuizQuestion {
-    word: String,
+    quiz_type: QuizType,
+    target: String,
+    prompt: String,
     options: Vec<String>,
-    answer_index: usize,
+    answer: QuizAnswer,
+}
+
+#[derive(Debug, Clone)]
+struct QuizReviewItem {
+    label: String,
+    user_answer: String,
+    correct_answer: String,
+    is_correct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,9 +158,14 @@ struct App {
     words: Vec<WordItem>,
     study_index: usize,
     quiz_questions: Vec<QuizQuestion>,
+    quiz_reviews: Vec<QuizReviewItem>,
     quiz_index: usize,
     selected_option: usize,
+    typed_answer: String,
     score: usize,
+    profile_name: String,
+    total_xp: u32,
+    english_skill: u32,
     message: String,
     quit: bool,
 }
@@ -149,17 +177,22 @@ impl Default for App {
             screen: Screen::ApiKeySetup,
             focused: InputField::ApiKey,
             api_key,
-            topic: "daily conversation".to_string(),
-            count_text: "8".to_string(),
+            topic: String::new(),
+            count_text: String::new(),
             topic_history: Vec::new(),
             selected_topic: 0,
             active_topic: None,
             words: Vec::new(),
             study_index: 0,
             quiz_questions: Vec::new(),
+            quiz_reviews: Vec::new(),
             quiz_index: 0,
             selected_option: 0,
+            typed_answer: String::new(),
             score: 0,
+            profile_name: "학습자".to_string(),
+            total_xp: 0,
+            english_skill: 0,
             message: "API Key를 입력하고 Enter를 누르세요".to_string(),
             quit: false,
         }
@@ -167,6 +200,10 @@ impl Default for App {
 }
 
 impl App {
+    fn add_xp(&mut self, xp: u32) {
+        self.total_xp = self.total_xp.saturating_add(xp);
+    }
+
     fn parse_count(&self) -> Result<usize> {
         let parsed = self
             .count_text
@@ -300,14 +337,22 @@ impl App {
             let total = self.quiz_questions.len();
             if total > 0 {
                 let passed = self.score * 100 >= total * 70;
+                self.add_xp(5);
+                if passed {
+                    self.english_skill = self.english_skill.saturating_add(1);
+                }
                 if let Some(record) = self.topic_history.get_mut(active) {
                     record.last_score = Some((self.score, total));
                     record.passed = passed;
                 }
+                self.message = if passed {
+                    "복습 완료! +5 XP, 영어 실력 +1".to_string()
+                } else {
+                    "복습 완료! +5 XP".to_string()
+                };
             }
         }
         self.screen = Screen::Result;
-        self.message = "M: 메인, S: 학습, Q: 시험, Esc: 종료".to_string();
     }
 
     fn start_main(&mut self) {
@@ -320,13 +365,31 @@ impl App {
         self.topic_history.get(self.selected_topic)
     }
 
+    fn known_terms(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut terms = Vec::new();
+
+        for record in &self.topic_history {
+            for word in &record.words {
+                let key = normalize_term(&word.term);
+                if !key.is_empty() && seen.insert(key) {
+                    terms.push(word.term.clone());
+                }
+            }
+        }
+
+        terms
+    }
+
     fn start_quiz(&mut self) {
         self.quiz_questions = build_quiz_questions(&self.words);
+        self.quiz_reviews.clear();
         self.quiz_index = 0;
         self.selected_option = 0;
+        self.typed_answer.clear();
         self.score = 0;
         self.screen = Screen::Quiz;
-        self.message = "위/아래로 선택, Enter로 제출".to_string();
+        self.message = "문제 유형이 랜덤으로 출제됩니다".to_string();
     }
 
     fn current_quiz(&self) -> Option<&QuizQuestion> {
@@ -334,12 +397,46 @@ impl App {
     }
 
     fn answer_current(&mut self) {
-        if let Some(question) = self.current_quiz() {
-            if self.selected_option == question.answer_index {
+        if let Some(question) = self.current_quiz().cloned() {
+            let (is_correct, user_answer, correct_answer) = match &question.answer {
+                QuizAnswer::Choice(answer_index) => {
+                    let user = question
+                        .options
+                        .get(self.selected_option)
+                        .cloned()
+                        .unwrap_or_else(|| "(미선택)".to_string());
+                    let correct = question
+                        .options
+                        .get(*answer_index)
+                        .cloned()
+                        .unwrap_or_else(|| "(정답 없음)".to_string());
+                    (self.selected_option == *answer_index, user, correct)
+                }
+                QuizAnswer::Text(answer_text) => {
+                    let user = if self.typed_answer.trim().is_empty() {
+                        "(미입력)".to_string()
+                    } else {
+                        self.typed_answer.trim().to_string()
+                    };
+                    (
+                        is_case_flexible_exact_match(&self.typed_answer, answer_text),
+                        user,
+                        answer_text.clone(),
+                    )
+                }
+            };
+            if is_correct {
                 self.score += 1;
             }
+            self.quiz_reviews.push(QuizReviewItem {
+                label: format!("{}: {}", quiz_type_label(question.quiz_type), question.target),
+                user_answer,
+                correct_answer,
+                is_correct,
+            });
             self.quiz_index += 1;
             self.selected_option = 0;
+            self.typed_answer.clear();
             if self.quiz_index >= self.quiz_questions.len() {
                 self.finish_quiz();
             }
@@ -429,7 +526,7 @@ async fn handle_key_event(
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 app.screen = Screen::TopicCreate;
                 app.focused = InputField::Topic;
-                app.message = "주제 입력 후 Enter: 단어 생성".to_string();
+                app.message = "주제/개수 입력 후 Enter: 단어 생성".to_string();
             }
             _ => {}
         },
@@ -458,13 +555,17 @@ async fn handle_key_event(
                 app.message = "OpenAI에서 단어를 생성하는 중...".to_string();
 
                 let api_key = app.api_key.clone();
+                let excluded_terms = app.known_terms();
+                let english_skill = app.english_skill;
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = fetch_words(&api_key, &topic, count).await.map(|words| GenerationResult {
-                        topic,
-                        count,
-                        words,
-                    });
+                    let result = fetch_words(&api_key, &topic, count, &excluded_terms, english_skill)
+                        .await
+                        .map(|words| GenerationResult {
+                            topic,
+                            count,
+                            words,
+                        });
                     let _ = tx.send(result);
                 });
             }
@@ -477,6 +578,7 @@ async fn handle_key_event(
                 if app.study_index + 1 < app.words.len() {
                     app.study_index += 1;
                 } else {
+                    app.add_xp(10);
                     app.start_quiz();
                 }
             }
@@ -485,18 +587,52 @@ async fn handle_key_event(
         },
         Screen::Quiz => match key.code {
             KeyCode::Up => {
-                if app.selected_option > 0 {
+                let is_choice = matches!(
+                    app.current_quiz().map(|question| &question.answer),
+                    Some(QuizAnswer::Choice(_))
+                );
+                if is_choice && app.selected_option > 0 {
                     app.selected_option -= 1;
                 }
             }
             KeyCode::Down => {
-                if let Some(question) = app.current_quiz() {
-                    if app.selected_option + 1 < question.options.len() {
+                let choice_option_len = app.current_quiz().and_then(|question| {
+                    if matches!(question.answer, QuizAnswer::Choice(_)) {
+                        Some(question.options.len())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(option_len) = choice_option_len {
+                    if app.selected_option + 1 < option_len {
                         app.selected_option += 1;
                     }
                 }
             }
             KeyCode::Enter => app.answer_current(),
+            KeyCode::Backspace => {
+                let is_text = matches!(
+                    app.current_quiz().map(|question| &question.answer),
+                    Some(QuizAnswer::Text(_))
+                );
+                if is_text {
+                    app.typed_answer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return;
+                }
+                let is_text = matches!(
+                    app.current_quiz().map(|question| &question.answer),
+                    Some(QuizAnswer::Text(_))
+                );
+                if is_text {
+                    if c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '\'' {
+                        app.typed_answer.push(c);
+                    }
+                }
+            }
             _ => {}
         },
         Screen::Result => match key.code {
@@ -592,6 +728,7 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(7),
             Constraint::Min(8),
             Constraint::Length(6),
         ])
@@ -633,6 +770,24 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
 
     let topic_list = List::new(items).block(Block::default().borders(Borders::ALL).title("Review Topics"));
 
+    let (level, current_level_xp, current_level_required, next_level_remaining) =
+        level_progress_from_xp(app.total_xp);
+
+    let profile = Paragraph::new(vec![
+        Line::from(format!("이름: {}", app.profile_name)),
+        Line::from(format!(
+            "전체 XP: {} (다음 레벨까지 {} XP)",
+            app.total_xp, next_level_remaining
+        )),
+        Line::from(format!(
+            "레벨: {} (레벨 진행 {}/{})",
+            level, current_level_xp, current_level_required
+        )),
+        Line::from(format!("언어 실력(영어): {}", app.english_skill)),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Profile"))
+    .wrap(Wrap { trim: true });
+
     let help = Paragraph::new(vec![
         Line::from("N: 새 주제 생성"),
         Line::from("Up/Down: 과거 주제 선택"),
@@ -644,8 +799,31 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
     .wrap(Wrap { trim: true });
 
     frame.render_widget(title, chunks[0]);
-    frame.render_widget(topic_list, chunks[1]);
-    frame.render_widget(help, chunks[2]);
+    frame.render_widget(profile, chunks[1]);
+    frame.render_widget(topic_list, chunks[2]);
+    frame.render_widget(help, chunks[3]);
+}
+
+fn xp_required_for_next_level(level: u32) -> u32 {
+    let base: u32 = 120;
+    let growth_per_level: u32 = 30;
+    base + growth_per_level.saturating_mul(level.saturating_sub(1))
+}
+
+fn level_progress_from_xp(total_xp: u32) -> (u32, u32, u32, u32) {
+    let mut level = 1;
+    let mut remaining_xp = total_xp;
+
+    loop {
+        let required = xp_required_for_next_level(level);
+        if remaining_xp < required {
+            let xp_in_current_level = remaining_xp;
+            let xp_to_next_level = required - remaining_xp;
+            return (level, xp_in_current_level, required, xp_to_next_level);
+        }
+        remaining_xp -= required;
+        level = level.saturating_add(1);
+    }
 }
 
 fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
@@ -673,7 +851,12 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
     } else {
         Style::default()
     };
-    let topic = Paragraph::new(app.topic.clone())
+    let topic_value = if app.topic.is_empty() {
+        "(예: travel conversation)".to_string()
+    } else {
+        app.topic.clone()
+    };
+    let topic = Paragraph::new(topic_value)
         .style(topic_style)
         .block(Block::default().borders(Borders::ALL).title("Topic"));
 
@@ -682,7 +865,12 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
     } else {
         Style::default()
     };
-    let count = Paragraph::new(app.count_text.clone())
+    let count_value = if app.count_text.is_empty() {
+        "(5-20)".to_string()
+    } else {
+        app.count_text.clone()
+    };
+    let count = Paragraph::new(count_value)
         .style(count_style)
         .block(
             Block::default()
@@ -731,7 +919,6 @@ fn draw_study(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(5),
-            Constraint::Length(5),
             Constraint::Min(1),
         ])
         .margin(2)
@@ -760,13 +947,6 @@ fn draw_study(frame: &mut Frame<'_>, app: &App) {
     let meaning = Paragraph::new(word.meaning_ko.clone())
         .block(Block::default().borders(Borders::ALL).title("Meaning (KR)"));
 
-    let example = Paragraph::new(vec![
-        Line::from(Span::raw(format!("EN: {}", word.example_en))),
-        Line::from(Span::raw(format!("KR: {}", word.example_ko))),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("Example"))
-    .wrap(Wrap { trim: true });
-
     let help = Paragraph::new(vec![
         Line::from("Enter: 다음 단어"),
         Line::from("Q: 바로 퀴즈 시작"),
@@ -777,8 +957,7 @@ fn draw_study(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(title, chunks[0]);
     frame.render_widget(term, chunks[1]);
     frame.render_widget(meaning, chunks[2]);
-    frame.render_widget(example, chunks[3]);
-    frame.render_widget(help, chunks[4]);
+    frame.render_widget(help, chunks[3]);
 }
 
 fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
@@ -790,7 +969,7 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(1),
         ])
         .margin(2)
@@ -807,42 +986,68 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
     )
-    .block(Block::default().borders(Borders::ALL).title("Quiz Mode"));
-
-    let prompt = Paragraph::new(format!("'{}'의 뜻을 고르세요", question.word))
-        .block(Block::default().borders(Borders::ALL).title("Question"));
-
-    let items: Vec<ListItem<'_>> = question
-        .options
-        .iter()
-        .enumerate()
-        .map(|(idx, option)| {
-            let style = if idx == app.selected_option {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(option.as_str()).style(style)
-        })
-        .collect();
-
-    let list = List::new(items).block(
+    .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Options (Up/Down + Enter)"),
+            .title(format!("Quiz Mode - {}", quiz_type_label(question.quiz_type))),
     );
+
+    let prompt = Paragraph::new(question.prompt.clone())
+        .block(Block::default().borders(Borders::ALL).title("Question"));
 
     frame.render_widget(title, chunks[0]);
     frame.render_widget(prompt, chunks[1]);
-    frame.render_widget(list, chunks[2]);
+
+    match &question.answer {
+        QuizAnswer::Choice(_) => {
+            let items: Vec<ListItem<'_>> = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(idx, option)| {
+                    let style = if idx == app.selected_option {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(option.as_str()).style(style)
+                })
+                .collect();
+
+            let list = List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Up/Down으로 선택, Enter 제출"),
+            );
+            frame.render_widget(list, chunks[2]);
+        }
+        QuizAnswer::Text(_) => {
+            let answer = Paragraph::new(vec![
+                Line::from(format!("입력: {}", app.typed_answer)),
+                Line::from(" "),
+                Line::from("알파벳 입력 + Backspace, Enter 제출"),
+            ])
+            .block(Block::default().borders(Borders::ALL).title("Type Answer"))
+            .wrap(Wrap { trim: true });
+            frame.render_widget(answer, chunks[2]);
+        }
+    }
 }
 
 fn draw_result(frame: &mut Frame<'_>, app: &App) {
-    let popup = centered_rect(60, 30, frame.area());
-    frame.render_widget(Clear, popup);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(6),
+        ])
+        .margin(2)
+        .split(frame.area());
 
     let rate = if app.quiz_questions.is_empty() {
         0.0
@@ -850,19 +1055,56 @@ fn draw_result(frame: &mut Frame<'_>, app: &App) {
         (app.score as f64 / app.quiz_questions.len() as f64) * 100.0
     };
 
-    let result = Paragraph::new(vec![
+    let title = Paragraph::new("Quiz Result")
+        .style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL).title("Result"));
+
+    let score = Paragraph::new(vec![
         Line::from(format!("정답: {}/{}", app.score, app.quiz_questions.len())),
         Line::from(format!("정답률: {:.1}%", rate)),
-        Line::from(" "),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Score"));
+
+    let review_items: Vec<ListItem<'_>> = if app.quiz_reviews.is_empty() {
+        vec![ListItem::new("문제 결과가 없습니다")]
+    } else {
+        app.quiz_reviews
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let mark = if item.is_correct { "O" } else { "X" };
+                ListItem::new(format!(
+                    "{}. [{}] {} | 내 답: {} | 정답: {}",
+                    idx + 1,
+                    mark,
+                    item.label,
+                    item.user_answer,
+                    item.correct_answer
+                ))
+            })
+            .collect()
+    };
+
+    let review = List::new(review_items)
+        .block(Block::default().borders(Borders::ALL).title("문제별 정오답"));
+
+    let help = Paragraph::new(vec![
         Line::from("M: 메인으로 이동"),
         Line::from("S: 다시 학습하기"),
         Line::from("Q: 다시 시험보기"),
         Line::from("Esc: 종료"),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Result"))
+    .block(Block::default().borders(Borders::ALL).title("Actions"))
     .wrap(Wrap { trim: true });
 
-    frame.render_widget(result, popup);
+    frame.render_widget(title, chunks[0]);
+    frame.render_widget(score, chunks[1]);
+    frame.render_widget(review, chunks[2]);
+    frame.render_widget(help, chunks[3]);
 }
 
 fn draw_error(frame: &mut Frame<'_>, app: &App) {
@@ -909,40 +1151,207 @@ fn centered_rect(
     })
 }
 
+fn quiz_type_label(quiz_type: QuizType) -> &'static str {
+    match quiz_type {
+        QuizType::MeaningChoice => "뜻 맞추기",
+        QuizType::FillBlankChoice => "빈칸 채우기",
+        QuizType::SpellingWrite => "철자 입력",
+    }
+}
+
+fn is_case_flexible_exact_match(input: &str, answer: &str) -> bool {
+    input.trim().eq_ignore_ascii_case(answer.trim())
+}
+
+fn mask_term(term: &str) -> String {
+    let chars: Vec<char> = term.chars().collect();
+    if chars.len() <= 2 {
+        return "__".to_string();
+    }
+    let mut masked = String::new();
+    for (idx, ch) in chars.iter().enumerate() {
+        if idx == 0 || idx + 1 == chars.len() {
+            masked.push(*ch);
+        } else if ch.is_ascii_alphabetic() {
+            masked.push('_');
+        } else {
+            masked.push(*ch);
+        }
+    }
+    masked
+}
+
+fn unique_terms(words: &[WordItem], exclude_index: usize) -> Vec<String> {
+    let mut items: Vec<String> = words
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != exclude_index)
+        .map(|(_, item)| item.term.clone())
+        .collect();
+    items.sort();
+    items.dedup();
+    items
+}
+
+fn unique_meanings(words: &[WordItem], exclude_index: usize) -> Vec<String> {
+    let mut items: Vec<String> = words
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != exclude_index)
+        .map(|(_, item)| item.meaning_ko.clone())
+        .collect();
+    items.sort();
+    items.dedup();
+    items
+}
+
 fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
     let mut rng = rand::rng();
     let mut questions = Vec::with_capacity(words.len());
 
     for (index, word) in words.iter().enumerate() {
-        let mut wrong_meanings: Vec<String> = words
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| *idx != index)
-            .map(|(_, item)| item.meaning_ko.clone())
-            .collect();
+        let question_type = match rng.random_range(0..3) {
+            0 => QuizType::MeaningChoice,
+            1 => QuizType::FillBlankChoice,
+            _ => QuizType::SpellingWrite,
+        };
 
-        wrong_meanings.shuffle(&mut rng);
-        let mut options = vec![word.meaning_ko.clone()];
-        options.extend(wrong_meanings.into_iter().take(3));
-        options.shuffle(&mut rng);
+        let question = match question_type {
+            QuizType::MeaningChoice => {
+                let mut wrong_meanings = unique_meanings(words, index);
+                wrong_meanings.shuffle(&mut rng);
 
-        let answer_index = options
-            .iter()
-            .position(|option| option == &word.meaning_ko)
-            .unwrap_or(0);
+                let mut options = vec![word.meaning_ko.clone()];
+                options.extend(wrong_meanings.into_iter().take(3));
+                options.shuffle(&mut rng);
 
-        questions.push(QuizQuestion {
-            word: word.term.clone(),
-            options,
-            answer_index,
-        });
+                let answer_index = options
+                    .iter()
+                    .position(|option| option == &word.meaning_ko)
+                    .unwrap_or(0);
+
+                QuizQuestion {
+                    quiz_type: QuizType::MeaningChoice,
+                    target: word.term.clone(),
+                    prompt: format!("'{}'의 뜻을 고르세요", word.term),
+                    options,
+                    answer: QuizAnswer::Choice(answer_index),
+                }
+            }
+            QuizType::FillBlankChoice => {
+                let mut wrong_terms = unique_terms(words, index);
+                wrong_terms.shuffle(&mut rng);
+
+                let mut options = vec![word.term.clone()];
+                options.extend(wrong_terms.into_iter().take(3));
+                options.shuffle(&mut rng);
+
+                let answer_index = options
+                    .iter()
+                    .position(|option| option == &word.term)
+                    .unwrap_or(0);
+
+                let prompt = format!(
+                    "빈칸에 들어갈 단어를 고르세요\n뜻: {}\n철자 힌트: {}",
+                    word.meaning_ko,
+                    mask_term(&word.term)
+                );
+
+                QuizQuestion {
+                    quiz_type: QuizType::FillBlankChoice,
+                    target: word.term.clone(),
+                    prompt,
+                    options,
+                    answer: QuizAnswer::Choice(answer_index),
+                }
+            }
+            QuizType::SpellingWrite => QuizQuestion {
+                quiz_type: QuizType::SpellingWrite,
+                target: word.term.clone(),
+                prompt: format!(
+                    "뜻을 보고 단어를 직접 입력하세요\n뜻: {}",
+                    word.meaning_ko
+                ),
+                options: Vec::new(),
+                answer: QuizAnswer::Text(word.term.clone()),
+            },
+        };
+
+        questions.push(question);
     }
 
     questions.shuffle(&mut rng);
     questions
 }
 
-async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<WordItem>> {
+fn normalize_term(term: &str) -> String {
+    term.trim().to_ascii_lowercase()
+}
+
+fn is_single_word_term(term: &str) -> bool {
+    let trimmed = term.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
+        && !trimmed.contains(' ')
+}
+
+async fn fetch_words(
+    api_key: &str,
+    topic: &str,
+    count: usize,
+    excluded_terms: &[String],
+    english_skill: u32,
+) -> Result<Vec<WordItem>> {
+    let mut blocked = HashSet::new();
+    for term in excluded_terms {
+        let normalized = normalize_term(term);
+        if !normalized.is_empty() {
+            blocked.insert(normalized);
+        }
+    }
+
+    let mut collected: Vec<WordItem> = Vec::with_capacity(count);
+    const MAX_ATTEMPTS: usize = 6;
+
+    for _ in 0..MAX_ATTEMPTS {
+        if collected.len() >= count {
+            break;
+        }
+
+        let remaining = count - collected.len();
+        let batch_count = remaining.saturating_add(4);
+        let batch = fetch_words_batch(api_key, topic, batch_count, english_skill).await?;
+        for item in batch {
+            let key = normalize_term(&item.term);
+            if key.is_empty() || blocked.contains(&key) || !is_single_word_term(&item.term) {
+                continue;
+            }
+            blocked.insert(key);
+            collected.push(item);
+            if collected.len() >= count {
+                break;
+            }
+        }
+    }
+
+    if collected.len() != count {
+        bail!(
+            "중복 없는 새 단어를 충분히 만들지 못했습니다: 요청 {count}, 생성 {}",
+            collected.len()
+        );
+    }
+
+    Ok(collected)
+}
+
+async fn fetch_words_batch(
+    api_key: &str,
+    topic: &str,
+    count: usize,
+    english_skill: u32,
+) -> Result<Vec<WordItem>> {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -953,12 +1362,13 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
                 "items": {
                     "type": "object",
                     "properties": {
-                        "term": {"type": "string"},
-                        "meaning_ko": {"type": "string"},
-                        "example_en": {"type": "string"},
-                        "example_ko": {"type": "string"}
+                        "term": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z]+(?:[-'][A-Za-z]+)*$"
+                        },
+                        "meaning_ko": {"type": "string"}
                     },
-                    "required": ["term", "meaning_ko", "example_en", "example_ko"],
+                    "required": ["term", "meaning_ko"],
                     "additionalProperties": false
                 }
             }
@@ -968,7 +1378,7 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
     });
 
     let user_prompt = format!(
-        "주제 '{topic}' 관련 실용 영어 단어를 정확히 {count}개 생성하세요. 각 단어는 쉬운 난이도(A1-B1), 중복 없이, 한국어 뜻은 짧고 명확하게, 예문은 영어/한국어 각각 1문장으로 짧게 작성하세요."
+        "주제: {topic}\n현재 사용자 영어 실력 레벨: {english_skill}\n주제에 맞는 실용 영어 단어를 정확히 {count}개 생성하세요. term은 반드시 한 단어만 허용되며 공백이 들어간 문장/구는 절대 금지입니다. 각 항목은 term(영단어)과 meaning_ko(짧고 명확한 한국어 뜻)만 포함하세요."
     );
 
     let request_body = ChatCompletionRequest {
@@ -976,7 +1386,7 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: "You are a fast vocabulary generator for Korean learners. Return only JSON that matches the schema. Use easy and practical words.",
+                content: "You are a fast vocabulary generator for Korean learners. Return only JSON that matches the schema. Every term must be exactly one English word (no spaces, no phrases, no full sentences). Difficulty should adapt to the user's English skill level.",
             },
             ChatMessage {
                 role: "user",
