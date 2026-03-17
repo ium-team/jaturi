@@ -150,7 +150,7 @@ impl Default for App {
             focused: InputField::ApiKey,
             api_key,
             topic: "daily conversation".to_string(),
-            count_text: "10".to_string(),
+            count_text: "8".to_string(),
             topic_history: Vec::new(),
             selected_topic: 0,
             active_topic: None,
@@ -173,10 +173,10 @@ impl App {
             .trim()
             .parse::<usize>()
             .context("개수는 숫자로 입력해야 합니다")?;
-        if (5..=30).contains(&parsed) {
+        if (5..=20).contains(&parsed) {
             Ok(parsed)
         } else {
-            bail!("개수는 5~30 사이로 입력해 주세요")
+            bail!("개수는 5~20 사이로 입력해 주세요")
         }
     }
 
@@ -687,7 +687,7 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Word Count (5-30)"),
+                .title("Word Count (5-20)"),
         );
 
     let help = Paragraph::new(vec![
@@ -968,7 +968,7 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
     });
 
     let user_prompt = format!(
-        "Generate exactly {count} practical English vocabulary words for topic '{topic}'. Return Korean meanings and sentence examples."
+        "주제 '{topic}' 관련 실용 영어 단어를 정확히 {count}개 생성하세요. 각 단어는 쉬운 난이도(A1-B1), 중복 없이, 한국어 뜻은 짧고 명확하게, 예문은 영어/한국어 각각 1문장으로 짧게 작성하세요."
     );
 
     let request_body = ChatCompletionRequest {
@@ -976,7 +976,7 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: "You are a vocabulary generator for Korean learners. Provide CEFR A2-B2 words, avoid profanity.",
+                content: "You are a fast vocabulary generator for Korean learners. Return only JSON that matches the schema. Use easy and practical words.",
             },
             ChatMessage {
                 role: "user",
@@ -991,7 +991,7 @@ async fn fetch_words(api_key: &str, topic: &str, count: usize) -> Result<Vec<Wor
                 strict: true,
             },
         },
-        temperature: 0.6,
+        temperature: 0.2,
     };
 
     let client = reqwest::Client::new();
