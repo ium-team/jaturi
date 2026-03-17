@@ -1,0 +1,17 @@
+/target
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# IDE/editor settings
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Rust tooling leftovers
+*.rs.bk
