@@ -5,6 +5,8 @@
 ## 이 서비스가 하는 일
 
 - API Key를 입력하면 AI가 학습 주제와 단어를 자동 생성
+- 최근 10개 주제와 겹치지 않는 새 주제를 우선 생성
+- 현재 언어 실력 + 앱 레벨을 반영해 단어 난이도를 조정
 - 단어 학습(뜻 확인) 후 바로 퀴즈로 복습
 - 언어별 진행도/점수/XP를 로컬에 저장
 - 주제 생성 시 단어 수는 항상 `10`개
@@ -18,7 +20,7 @@
 ### Linux (x86_64)
 
 ```bash
-VERSION="v0.1.3"
+VERSION="v0.1.4"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 chmod +x install.sh
@@ -30,7 +32,7 @@ jaturi
 ### macOS (Apple Silicon)
 
 ```bash
-VERSION="v0.1.3"
+VERSION="v0.1.4"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 chmod +x install.sh
@@ -42,7 +44,7 @@ jaturi
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-$Version = "v0.1.3"
+$Version = "v0.1.4"
 Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
 Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
 .\install.ps1
@@ -66,6 +68,7 @@ jaturi
 
 - 메인에서 `N` 눌러 주제 생성 화면 이동
 - `Enter`를 누르면 AI가 주제 + 단어 10개 자동 생성
+- 최근 10개 주제와 겹치는 주제는 피하고, 현재 학습 수준에 맞는 단어를 우선 생성
 
 ### 3) 학습
 
