@@ -706,6 +706,11 @@ impl App {
         }
     }
 
+    fn cancel_study(&mut self) {
+        self.screen = Screen::Main;
+        self.message = "학습을 취소하고 메인으로 돌아왔습니다.".to_string();
+    }
+
     fn start_quiz_for(&mut self, index: usize) {
         if let Some(words) = self
             .current_progress()
@@ -717,6 +722,17 @@ impl App {
             self.words = words;
             self.start_quiz();
         }
+    }
+
+    fn cancel_quiz(&mut self) {
+        self.quiz_questions.clear();
+        self.quiz_reviews.clear();
+        self.quiz_index = 0;
+        self.selected_option = 0;
+        self.typed_answer.clear();
+        self.score = 0;
+        self.screen = Screen::Main;
+        self.message = "시험을 취소하고 메인으로 돌아왔습니다.".to_string();
     }
 
     fn finish_quiz(&mut self) {
@@ -1010,6 +1026,20 @@ async fn handle_key_event(
     app: &mut App,
     tx: &mpsc::UnboundedSender<Result<GenerationResult>>,
 ) {
+    if key.code == KeyCode::Esc {
+        match app.screen {
+            Screen::Study => {
+                app.cancel_study();
+                return;
+            }
+            Screen::Quiz => {
+                app.cancel_quiz();
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if key.code == KeyCode::Esc {
         if app.flush_pending_save() {
             app.quit = true;
@@ -1554,7 +1584,7 @@ fn draw_study(frame: &mut Frame<'_>, app: &App) {
     let help = Paragraph::new(vec![
         Line::from("Enter: 다음 단어"),
         Line::from("Q: 바로 퀴즈 시작"),
-        Line::from("Esc: 종료"),
+        Line::from("Esc: 학습 취소 후 메인으로"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"));
 
@@ -1623,7 +1653,7 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
             let list = List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Up/Down으로 선택, Enter 제출"),
+                    .title("Up/Down으로 선택, Enter 제출, Esc 메인"),
             );
             frame.render_widget(list, chunks[2]);
         }
@@ -1631,7 +1661,8 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
             let answer = Paragraph::new(vec![
                 Line::from(format!("입력: {}", app.typed_answer)),
                 Line::from(" "),
-                Line::from("문자 입력(일본어/중국어 IME, 붙여넣기 지원) + Backspace, Enter 제출"),
+                Line::from("문자 입력 + Backspace, Enter 제출"),
+                Line::from("Esc: 시험 취소 후 메인으로"),
             ])
             .block(Block::default().borders(Borders::ALL).title("Type Answer"))
             .wrap(Wrap { trim: true });

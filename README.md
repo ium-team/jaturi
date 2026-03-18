@@ -22,7 +22,7 @@
 ### Linux (x86_64)
 
 ```bash
-VERSION="v0.1.6"
+VERSION="v0.1.7"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 chmod +x install.sh
@@ -34,7 +34,7 @@ jaturi
 ### macOS (Apple Silicon)
 
 ```bash
-VERSION="v0.1.6"
+VERSION="v0.1.7"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 chmod +x install.sh
@@ -46,7 +46,7 @@ jaturi
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-$Version = "v0.1.6"
+$Version = "v0.1.7"
 Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
 Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
 .\install.ps1
@@ -73,7 +73,7 @@ Linux 예시:
 
 ```bash
 sha256sum ~/.local/bin/jaturi
-curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.6/SHA256SUMS.txt
+curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.7/SHA256SUMS.txt
 ```
 
 버전이 다르면 같은 폴더(압축 해제 폴더)에서 `./install.sh` 또는 `./install.ps1`를 다시 실행해 덮어설치하세요.
@@ -114,12 +114,12 @@ curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.6/SHA256SUMS.t
 
 ## 키 조작 요약
 
-- 공통: `Esc` 종료
+- 공통: `Esc` 종료 (`학습`/`퀴즈` 화면에서는 중간 취소 후 메인 복귀)
 - 설정 화면: `Up/Down`, `Tab` 이동, `Enter` 편집 시작/종료, `S` 저장
 - 메인 화면: `N` 새 주제, `S`/`Enter` 학습, `Q` 퀴즈, `K` 설정
 - 주제 생성: `Enter` 생성 시작, `M` 메인 복귀
-- 학습: `Enter` 다음 단어, `Q` 퀴즈
-- 퀴즈: 객관식 `Up/Down + Enter`, 주관식 `입력 + Enter`
+- 학습: `Enter` 다음 단어, `Q` 퀴즈, `Esc` 학습 취소 후 메인
+- 퀴즈: 객관식 `Up/Down + Enter`, 주관식 `입력 + Enter`, `Esc` 시험 취소 후 메인
 - 결과: `M` 메인, `S` 학습, `Q` 퀴즈
 - 에러: `R` 복구/재시도, `Q` 종료
 
