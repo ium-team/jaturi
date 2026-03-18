@@ -11,8 +11,8 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use ratatui::layout::{Constraint, Direction, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -27,8 +27,63 @@ struct WordItem {
     meaning_ko: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum LearningLanguage {
+    English,
+    Japanese,
+    Chinese,
+}
+
+impl LearningLanguage {
+    const ALL: [Self; 3] = [Self::English, Self::Japanese, Self::Chinese];
+
+    fn display_name_ko(self) -> &'static str {
+        match self {
+            Self::English => "영어",
+            Self::Japanese => "일본어",
+            Self::Chinese => "중국어",
+        }
+    }
+
+    fn topic_language_name() -> &'static str {
+        "Korean"
+    }
+
+    fn term_language_name(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Japanese => "Japanese",
+            Self::Chinese => "Chinese",
+        }
+    }
+
+    fn rotate(self, delta: isize) -> Self {
+        let len = Self::ALL.len() as isize;
+        let idx = Self::ALL
+            .iter()
+            .position(|language| *language == self)
+            .unwrap_or(0) as isize;
+        let next = (idx + delta).rem_euclid(len) as usize;
+        Self::ALL[next]
+    }
+}
+
+fn default_learning_language() -> LearningLanguage {
+    LearningLanguage::English
+}
+
+fn default_profile_name() -> String {
+    env::var("HOSTNAME")
+        .ok()
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("localhost"))
+        .unwrap_or_else(|| "학습자".to_string())
+}
+
 #[derive(Debug, Deserialize)]
-struct WordPayload {
+struct GenerationPayload {
+    topic: String,
     words: Vec<WordItem>,
 }
 
@@ -116,20 +171,11 @@ enum Screen {
     Error,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputField {
     ApiKey,
-    Topic,
-    Count,
-}
-
-impl InputField {
-    fn next_for_topic_create(self) -> Self {
-        match self {
-            InputField::Topic => InputField::Count,
-            _ => InputField::Topic,
-        }
-    }
+    ProfileName,
+    LearningLanguage,
 }
 
 #[derive(Debug)]
@@ -146,8 +192,40 @@ struct TopicRecord {
     passed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LanguageProgress {
+    skill: u32,
+    topic_history: Vec<TopicRecord>,
+    selected_topic: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LearningProgressStore {
+    english: LanguageProgress,
+    japanese: LanguageProgress,
+    chinese: LanguageProgress,
+}
+
+impl LearningProgressStore {
+    fn for_language(&self, language: LearningLanguage) -> &LanguageProgress {
+        match language {
+            LearningLanguage::English => &self.english,
+            LearningLanguage::Japanese => &self.japanese,
+            LearningLanguage::Chinese => &self.chinese,
+        }
+    }
+
+    fn for_language_mut(&mut self, language: LearningLanguage) -> &mut LanguageProgress {
+        match language {
+            LearningLanguage::English => &mut self.english,
+            LearningLanguage::Japanese => &mut self.japanese,
+            LearningLanguage::Chinese => &mut self.chinese,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-struct PersistedState {
+struct PersistedStateV2 {
     version: u8,
     profile_name: String,
     total_xp: u32,
@@ -156,19 +234,49 @@ struct PersistedState {
     selected_topic: usize,
 }
 
-const STATE_VERSION: u8 = 2;
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedStateV3 {
+    version: u8,
+    profile_name: String,
+    total_xp: u32,
+    english_skill: u32,
+    topic_history: Vec<TopicRecord>,
+    selected_topic: usize,
+    learning_language: LearningLanguage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedStateV4 {
+    version: u8,
+    profile_name: String,
+    total_xp: u32,
+    learning_language: LearningLanguage,
+    progress: LearningProgressStore,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedStateV5 {
+    version: u8,
+    profile_name: String,
+    total_xp: u32,
+    learning_language: LearningLanguage,
+    progress: LearningProgressStore,
+    api_key: String,
+}
+
+const STATE_VERSION: u8 = 5;
 const STATE_DIR_NAME: &str = "vocab_tui";
 const STATE_FILE_NAME: &str = "state.bin";
+const GENERATED_WORD_COUNT: usize = 10;
 
 #[derive(Debug)]
 struct App {
     screen: Screen,
     focused: InputField,
     api_key: String,
-    topic: String,
-    count_text: String,
-    topic_history: Vec<TopicRecord>,
-    selected_topic: usize,
+    learning_language: LearningLanguage,
+    setup_editing: bool,
+    progress: LearningProgressStore,
     active_topic: Option<usize>,
     words: Vec<WordItem>,
     study_index: usize,
@@ -180,8 +288,8 @@ struct App {
     score: usize,
     profile_name: String,
     total_xp: u32,
-    english_skill: u32,
     message: String,
+    pending_persist: bool,
     quit: bool,
 }
 
@@ -192,10 +300,9 @@ impl Default for App {
             screen: Screen::ApiKeySetup,
             focused: InputField::ApiKey,
             api_key,
-            topic: String::new(),
-            count_text: String::new(),
-            topic_history: Vec::new(),
-            selected_topic: 0,
+            learning_language: default_learning_language(),
+            setup_editing: false,
+            progress: LearningProgressStore::default(),
             active_topic: None,
             words: Vec::new(),
             study_index: 0,
@@ -205,31 +312,66 @@ impl Default for App {
             selected_option: 0,
             typed_answer: String::new(),
             score: 0,
-            profile_name: "학습자".to_string(),
+            profile_name: default_profile_name(),
             total_xp: 0,
-            english_skill: 0,
-            message: "API Key를 입력하고 Enter를 누르세요".to_string(),
+            message: "API Key, 사용자 이름, 언어를 설정하고 Enter를 누르세요".to_string(),
+            pending_persist: false,
             quit: false,
         }
     }
 }
 
 impl App {
+    fn current_progress(&self) -> &LanguageProgress {
+        self.progress.for_language(self.learning_language)
+    }
+
+    fn current_progress_mut(&mut self) -> &mut LanguageProgress {
+        self.progress.for_language_mut(self.learning_language)
+    }
+
+    fn current_skill(&self) -> u32 {
+        self.current_progress().skill
+    }
+
+    fn current_selected_topic(&self) -> usize {
+        self.current_progress().selected_topic
+    }
+
     fn add_xp(&mut self, xp: u32) {
         self.total_xp = self.total_xp.saturating_add(xp);
+        self.pending_persist = true;
+    }
+
+    fn flush_pending_save(&mut self) -> bool {
+        if !self.pending_persist {
+            return true;
+        }
+
+        match self.save_persisted_state() {
+            Ok(()) => {
+                self.pending_persist = false;
+                true
+            }
+            Err(err) => {
+                self.screen = Screen::Error;
+                self.message = format!(
+                    "학습 상태 저장 실패: {err}. R: 다시 저장 시도 (저장 전까지 종료 불가)"
+                );
+                false
+            }
+        }
     }
 
     fn save_persisted_state(&self) -> Result<()> {
         let path = state_file_path()?;
-        let state = PersistedState {
+        let state = PersistedStateV5 {
             version: STATE_VERSION,
             profile_name: self.profile_name.clone(),
             total_xp: self.total_xp,
-            english_skill: self.english_skill,
-            topic_history: self.topic_history.clone(),
-            selected_topic: self
-                .selected_topic
-                .min(self.topic_history.len().saturating_sub(1)),
+            learning_language: self.learning_language,
+            progress: self.progress.clone(),
+            api_key: self.api_key.clone(),
         };
         let bytes = bincode::serde::encode_to_vec(&state, bincode::config::standard())
             .context("학습 상태 직렬화 실패")?;
@@ -243,44 +385,121 @@ impl App {
         }
 
         let bytes = fs::read(&path).context("학습 상태 파일 읽기 실패")?;
-        let (state, used): (PersistedState, usize) =
+
+        if let Ok((state, used)) = bincode::serde::decode_from_slice::<PersistedStateV5, _>(
+            &bytes,
+            bincode::config::standard(),
+        ) {
+            if used == bytes.len() && state.version == STATE_VERSION {
+                self.profile_name = state.profile_name;
+                self.total_xp = state.total_xp;
+                self.progress = state.progress;
+                self.learning_language = state.learning_language;
+                self.api_key = state.api_key;
+                self.sanitize_all_progresses();
+                self.normalize_selection();
+                return Ok(true);
+            }
+        }
+
+        if let Ok((state, used)) = bincode::serde::decode_from_slice::<PersistedStateV4, _>(
+            &bytes,
+            bincode::config::standard(),
+        ) {
+            if used == bytes.len() && state.version == 4 {
+                self.profile_name = state.profile_name;
+                self.total_xp = state.total_xp;
+                self.progress = state.progress;
+                self.learning_language = state.learning_language;
+                self.api_key.clear();
+                self.sanitize_all_progresses();
+                self.normalize_selection();
+                return Ok(true);
+            }
+        }
+
+        if let Ok((state, used)) = bincode::serde::decode_from_slice::<PersistedStateV3, _>(
+            &bytes,
+            bincode::config::standard(),
+        ) {
+            if used == bytes.len() && state.version == 3 {
+                self.apply_legacy_single_progress(
+                    state.profile_name,
+                    state.total_xp,
+                    state.english_skill,
+                    state.topic_history,
+                    state.selected_topic,
+                    state.learning_language,
+                );
+                return Ok(true);
+            }
+        }
+
+        let (legacy, used): (PersistedStateV2, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
                 .context("학습 상태 파일 파싱 실패")?;
         if used != bytes.len() {
             bail!("학습 상태 파일 끝에 불필요한 데이터가 있습니다");
         }
-
-        if state.version != STATE_VERSION {
+        if legacy.version != 2 {
             bail!(
-                "지원하지 않는 상태 버전입니다: {}, 기대값: {}",
-                state.version,
+                "지원하지 않는 상태 버전입니다: {}, 기대값: 2, 3, 4 또는 {}",
+                legacy.version,
                 STATE_VERSION
             );
         }
-
-        self.profile_name = state.profile_name;
-        self.total_xp = state.total_xp;
-        self.english_skill = state.english_skill;
-        self.topic_history = state.topic_history;
-        if self.topic_history.is_empty() {
-            self.selected_topic = 0;
-        } else {
-            self.selected_topic = state.selected_topic.min(self.topic_history.len() - 1);
-        }
+        self.apply_legacy_single_progress(
+            legacy.profile_name,
+            legacy.total_xp,
+            legacy.english_skill,
+            legacy.topic_history,
+            legacy.selected_topic,
+            default_learning_language(),
+        );
 
         Ok(true)
     }
 
-    fn parse_count(&self) -> Result<usize> {
-        let parsed = self
-            .count_text
-            .trim()
-            .parse::<usize>()
-            .context("개수는 숫자로 입력해야 합니다")?;
-        if (5..=20).contains(&parsed) {
-            Ok(parsed)
+    fn apply_legacy_single_progress(
+        &mut self,
+        profile_name: String,
+        total_xp: u32,
+        skill: u32,
+        topic_history: Vec<TopicRecord>,
+        selected_topic: usize,
+        language: LearningLanguage,
+    ) {
+        self.profile_name = profile_name;
+        self.total_xp = total_xp;
+        self.progress = LearningProgressStore::default();
+        let progress = self.progress.for_language_mut(language);
+        progress.skill = skill;
+        progress.topic_history = topic_history;
+        if progress.topic_history.is_empty() {
+            progress.selected_topic = 0;
         } else {
-            bail!("개수는 5~20 사이로 입력해 주세요")
+            progress.selected_topic = selected_topic.min(progress.topic_history.len() - 1);
+        }
+        self.learning_language = language;
+        self.sanitize_all_progresses();
+        self.normalize_selection();
+    }
+
+    fn sanitize_all_progresses(&mut self) {
+        for language in LearningLanguage::ALL {
+            let progress = self.progress.for_language_mut(language);
+            progress.topic_history.retain(|record| {
+                !record.words.is_empty()
+                    && record
+                        .words
+                        .iter()
+                        .all(|word| is_single_word_term(&word.term, language))
+            });
+            if progress.topic_history.is_empty() {
+                progress.selected_topic = 0;
+            } else {
+                progress.selected_topic = progress.selected_topic.min(progress.topic_history.len() - 1);
+            }
         }
     }
 
@@ -297,104 +516,186 @@ impl App {
             self.message = "API Key를 입력해 주세요".to_string();
             return;
         }
+        let normalized_name = self.profile_name.trim().to_string();
+        if normalized_name.is_empty() {
+            self.message = "사용자 이름을 입력해 주세요".to_string();
+            self.focused = InputField::ProfileName;
+            return;
+        }
         self.api_key = normalized;
-        self.screen = Screen::Main;
-        self.message = "N: 새 주제 생성, S: 학습, Q: 시험".to_string();
-        self.focused = InputField::Topic;
-    }
-
-    fn handle_api_key_input(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Backspace => {
-                self.api_key.pop();
-            }
-            KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.api_key.push(c);
-                }
-            }
-            _ => {}
+        self.profile_name = normalized_name;
+        self.setup_editing = false;
+        self.pending_persist = true;
+        if self.flush_pending_save() {
+            self.screen = Screen::Main;
+            self.message = "N: 새 주제 생성, S: 학습, Q: 시험, K: 설정 수정".to_string();
         }
     }
 
-    fn handle_topic_create_input(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Tab => self.focused = self.focused.next_for_topic_create(),
-            KeyCode::Backspace => match self.focused {
-                InputField::Topic => {
-                    self.topic.pop();
+    fn move_setup_focus(&mut self, delta: isize) {
+        let fields = [
+            InputField::ApiKey,
+            InputField::ProfileName,
+            InputField::LearningLanguage,
+        ];
+        let current = fields
+            .iter()
+            .position(|field| *field == self.focused)
+            .unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(fields.len() as isize) as usize;
+        self.focused = fields[next];
+    }
+
+    fn adjust_language(&mut self, delta: isize) {
+        self.learning_language = self.learning_language.rotate(delta);
+        self.normalize_selection();
+    }
+
+    fn handle_setup_input(&mut self, key: KeyEvent) {
+        if self.setup_editing {
+            match key.code {
+                KeyCode::Enter => {
+                    self.setup_editing = false;
+                    self.message = "편집 완료. Up/Down으로 항목 이동, S로 설정 저장".to_string();
                 }
-                InputField::Count => {
-                    self.count_text.pop();
+                KeyCode::Left => {
+                    if matches!(self.focused, InputField::LearningLanguage) {
+                        self.adjust_language(-1);
+                    }
                 }
-                InputField::ApiKey => {}
-            },
-            KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return;
+                KeyCode::Right => {
+                    if matches!(self.focused, InputField::LearningLanguage) {
+                        self.adjust_language(1);
+                    }
                 }
-                match self.focused {
-                    InputField::Topic => self.topic.push(c),
-                    InputField::Count => {
-                        if c.is_ascii_digit() {
-                            self.count_text.push(c);
+                KeyCode::Backspace => match self.focused {
+                    InputField::ApiKey => {
+                        self.api_key.pop();
+                    }
+                    InputField::ProfileName => {
+                        self.profile_name.pop();
+                    }
+                    InputField::LearningLanguage => {}
+                },
+                KeyCode::Char(c) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match self.focused {
+                            InputField::ApiKey => self.api_key.push(c),
+                            InputField::ProfileName => {
+                                if c != '\n' && c != '\r' {
+                                    self.profile_name.push(c);
+                                }
+                            }
+                            InputField::LearningLanguage => {
+                                if c == 'h' || c == 'H' {
+                                    self.adjust_language(-1);
+                                } else if c == 'l' || c == 'L' {
+                                    self.adjust_language(1);
+                                }
+                            }
                         }
                     }
-                    InputField::ApiKey => {}
                 }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Up => self.move_setup_focus(-1),
+            KeyCode::Down => self.move_setup_focus(1),
+            KeyCode::Tab => self.move_setup_focus(1),
+            KeyCode::BackTab => self.move_setup_focus(-1),
+            KeyCode::Enter => {
+                self.setup_editing = true;
+                self.message = match self.focused {
+                    InputField::ApiKey => "API Key 편집 중... Enter로 편집 종료".to_string(),
+                    InputField::ProfileName => "이름 편집 중... Enter로 편집 종료".to_string(),
+                    InputField::LearningLanguage => {
+                        "언어 편집 중... Left/Right로 변경 후 Enter".to_string()
+                    }
+                };
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.setup_api_key();
             }
             _ => {}
         }
     }
 
     fn topic_count(&self) -> usize {
-        self.topic_history.len()
+        self.current_progress().topic_history.len()
     }
 
     fn move_topic_selection(&mut self, delta: isize) {
         let len = self.topic_count();
-        if len == 0 {
-            self.selected_topic = 0;
+        let current_selected = self.current_selected_topic();
+        let next = if len == 0 {
+            0
+        } else {
+            let current = current_selected.min(len - 1) as isize;
+            (current + delta).clamp(0, (len - 1) as isize) as usize
+        };
+        self.current_progress_mut().selected_topic = next;
+    }
+
+    fn normalize_selection_for_language(&mut self, language: LearningLanguage) {
+        let progress = self.progress.for_language_mut(language);
+        if progress.topic_history.is_empty() {
+            progress.selected_topic = 0;
             return;
         }
-        let current = self.selected_topic.min(len - 1) as isize;
-        let next = (current + delta).clamp(0, (len - 1) as isize) as usize;
-        self.selected_topic = next;
+        progress.selected_topic = progress.selected_topic.min(progress.topic_history.len() - 1);
     }
 
     fn normalize_selection(&mut self) {
-        if self.topic_history.is_empty() {
-            self.selected_topic = 0;
+        self.normalize_selection_for_language(self.learning_language);
+        let has_topics = !self.current_progress().topic_history.is_empty();
+        if !has_topics {
             self.active_topic = None;
-            return;
         }
-        self.selected_topic = self.selected_topic.min(self.topic_history.len() - 1);
     }
 
-    fn save_topic(&mut self, topic: String, words: Vec<WordItem>) -> usize {
-        self.topic_history.push(TopicRecord {
-            topic,
-            words,
-            last_score: None,
-            passed: false,
-        });
-        let index = self.topic_history.len() - 1;
-        self.selected_topic = index;
-        if let Err(err) = self.save_persisted_state() {
-            self.message = format!("학습 상태 저장 실패: {err}");
+    fn save_topic(&mut self, topic: String, words: Vec<WordItem>) -> Option<usize> {
+        let index = {
+            let progress = self.current_progress_mut();
+            progress.topic_history.push(TopicRecord {
+                topic,
+                words,
+                last_score: None,
+                passed: false,
+            });
+            let index = progress.topic_history.len() - 1;
+            progress.selected_topic = index;
+            index
+        };
+        self.pending_persist = true;
+        if self.flush_pending_save() {
+            Some(index)
+        } else {
+            None
         }
-        index
     }
 
     fn start_study_for(&mut self, index: usize) {
-        if let Some(words) = self.topic_history.get(index).map(|record| record.words.clone()) {
+        if let Some(words) = self
+            .current_progress()
+            .topic_history
+            .get(index)
+            .map(|record| record.words.clone())
+        {
             self.active_topic = Some(index);
             self.start_study(words);
         }
     }
 
     fn start_quiz_for(&mut self, index: usize) {
-        if let Some(words) = self.topic_history.get(index).map(|record| record.words.clone()) {
+        if let Some(words) = self
+            .current_progress()
+            .topic_history
+            .get(index)
+            .map(|record| record.words.clone())
+        {
             self.active_topic = Some(index);
             self.words = words;
             self.start_quiz();
@@ -405,43 +706,54 @@ impl App {
         if let Some(active) = self.active_topic {
             let total = self.quiz_questions.len();
             if total > 0 {
-                let passed = self.score * 100 >= total * 70;
+                let score = self.score;
+                let passed = score * 100 >= total * 70;
                 self.add_xp(5);
-                if passed {
-                    self.english_skill = self.english_skill.saturating_add(1);
+                let should_increase_skill = {
+                    let progress = self.current_progress();
+                    passed && !progress.topic_history.iter().any(|record| record.passed)
+                };
+                if should_increase_skill {
+                    let progress = self.current_progress_mut();
+                    progress.skill = progress.skill.saturating_add(1);
                 }
-                if let Some(record) = self.topic_history.get_mut(active) {
-                    record.last_score = Some((self.score, total));
+                if let Some(record) = self.current_progress_mut().topic_history.get_mut(active) {
+                    record.last_score = Some((score, total));
                     record.passed = passed;
                 }
-                self.message = if passed {
-                    "복습 완료! +5 XP, 영어 실력 +1".to_string()
+                self.message = if should_increase_skill {
+                    format!(
+                        "복습 완료! +5 XP, {} 실력 +1",
+                        self.learning_language.display_name_ko()
+                    )
                 } else {
                     "복습 완료! +5 XP".to_string()
                 };
+                self.pending_persist = true;
             }
         }
         self.screen = Screen::Result;
-        if let Err(err) = self.save_persisted_state() {
-            self.message = format!("학습 상태 저장 실패: {err}");
-        }
+        self.flush_pending_save();
     }
 
     fn start_main(&mut self) {
+        self.sanitize_all_progresses();
         self.normalize_selection();
         self.screen = Screen::Main;
-        self.message = "N: 새 주제 생성, S: 학습, Q: 시험, Enter: 학습".to_string();
+        self.message = "N: 새 주제 생성, S: 학습, Q: 시험, K: 설정 수정, Enter: 학습".to_string();
     }
 
     fn selected_topic_record(&self) -> Option<&TopicRecord> {
-        self.topic_history.get(self.selected_topic)
+        self.current_progress()
+            .topic_history
+            .get(self.current_selected_topic())
     }
 
     fn known_terms(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut terms = Vec::new();
 
-        for record in &self.topic_history {
+        for record in &self.current_progress().topic_history {
             for word in &record.words {
                 let key = normalize_term(&word.term);
                 if !key.is_empty() && seen.insert(key) {
@@ -501,7 +813,11 @@ impl App {
                 self.score += 1;
             }
             self.quiz_reviews.push(QuizReviewItem {
-                label: format!("{}: {}", quiz_type_label(question.quiz_type), question.target),
+                label: format!(
+                    "{}: {}",
+                    quiz_type_label(question.quiz_type),
+                    question.target
+                ),
                 user_answer,
                 correct_answer,
                 is_correct,
@@ -529,10 +845,12 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
     match app.load_persisted_state() {
         Ok(true) => {
             app.screen = Screen::Main;
-            app.focused = InputField::Topic;
-            app.message =
+            app.message = if app.api_key.trim().is_empty() {
                 "이전 학습 기록을 불러왔습니다. N으로 새 주제 생성 시 API Key를 입력해 주세요"
-                    .to_string();
+                    .to_string()
+            } else {
+                "이전 학습 기록과 API Key를 불러왔습니다.".to_string()
+            };
         }
         Ok(false) => {}
         Err(err) => {
@@ -548,8 +866,9 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
             match rx.try_recv() {
                 Ok(result) => match result {
                     Ok(output) => {
-                        let index = app.save_topic(output.topic, output.words);
-                        app.start_study_for(index);
+                        if let Some(index) = app.save_topic(output.topic, output.words) {
+                            app.start_study_for(index);
+                        }
                     }
                     Err(err) => {
                         app.screen = Screen::Error;
@@ -564,15 +883,16 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
             }
         }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                handle_key_event(key, &mut app, &tx).await;
-            }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            handle_key_event(key, &mut app, &tx).await;
         }
     }
 
-    if let Err(err) = app.save_persisted_state() {
-        app.message = format!("학습 상태 저장 실패: {err}");
+    if app.pending_persist {
+        app.save_persisted_state()
+            .context("종료 전 학습 상태 저장 실패")?;
     }
 
     Ok(())
@@ -584,58 +904,54 @@ async fn handle_key_event(
     tx: &mpsc::UnboundedSender<Result<GenerationResult>>,
 ) {
     if key.code == KeyCode::Esc {
-        app.quit = true;
+        if app.flush_pending_save() {
+            app.quit = true;
+        }
         return;
     }
 
     match app.screen {
-        Screen::ApiKeySetup => match key.code {
-            KeyCode::Enter => {
-                app.setup_api_key();
-            }
-            _ => app.handle_api_key_input(key),
-        },
+        Screen::ApiKeySetup => app.handle_setup_input(key),
         Screen::Main => match key.code {
             KeyCode::Up => app.move_topic_selection(-1),
             KeyCode::Down => app.move_topic_selection(1),
             KeyCode::Enter | KeyCode::Char('s') | KeyCode::Char('S') => {
                 if app.selected_topic_record().is_some() {
-                    app.start_study_for(app.selected_topic);
+                    app.start_study_for(app.current_selected_topic());
                 } else {
                     app.screen = Screen::TopicCreate;
-                    app.focused = InputField::Topic;
-                    app.message = "새 주제를 입력하세요".to_string();
+                    app.message = format!(
+                        "Enter: AI가 주제와 단어를 자동 생성합니다 ({}개)",
+                        GENERATED_WORD_COUNT
+                    );
                 }
             }
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 if app.selected_topic_record().is_some() {
-                    app.start_quiz_for(app.selected_topic);
+                    app.start_quiz_for(app.current_selected_topic());
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 app.screen = Screen::TopicCreate;
-                app.focused = InputField::Topic;
-                app.message = "주제/개수 입력 후 Enter: 단어 생성".to_string();
+                app.message = format!(
+                    "Enter: AI가 주제와 단어를 자동 생성합니다 ({}개)",
+                    GENERATED_WORD_COUNT
+                );
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                app.screen = Screen::ApiKeySetup;
+                app.focused = InputField::ApiKey;
+                app.setup_editing = false;
+                app.message = "Up/Down으로 항목 선택, Enter로 편집, S로 저장".to_string();
             }
             _ => {}
         },
         Screen::TopicCreate => match key.code {
             KeyCode::Enter => {
-                let topic = app.topic.trim().to_string();
-                if topic.is_empty() {
-                    app.message = "주제를 입력해 주세요".to_string();
-                    return;
-                }
-                let count = match app.parse_count() {
-                    Ok(value) => value,
-                    Err(err) => {
-                        app.message = err.to_string();
-                        return;
-                    }
-                };
                 if app.api_key.trim().is_empty() {
                     app.screen = Screen::ApiKeySetup;
                     app.focused = InputField::ApiKey;
+                    app.setup_editing = false;
                     app.message = "API Key를 먼저 설정해 주세요".to_string();
                     return;
                 }
@@ -645,17 +961,23 @@ async fn handle_key_event(
 
                 let api_key = app.api_key.clone();
                 let excluded_terms = app.known_terms();
-                let english_skill = app.english_skill;
+                let language_skill = app.current_skill();
+                let learning_language = app.learning_language;
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = fetch_words(&api_key, &topic, count, &excluded_terms, english_skill)
-                        .await
-                        .map(|words| GenerationResult { topic, words });
+                    let result = fetch_words(
+                        &api_key,
+                        GENERATED_WORD_COUNT,
+                        &excluded_terms,
+                        language_skill,
+                        learning_language,
+                    )
+                    .await;
                     let _ = tx.send(result);
                 });
             }
             KeyCode::Char('m') | KeyCode::Char('M') => app.start_main(),
-            _ => app.handle_topic_create_input(key),
+            _ => {}
         },
         Screen::Loading => {}
         Screen::Study => match key.code {
@@ -664,10 +986,9 @@ async fn handle_key_event(
                     app.study_index += 1;
                 } else {
                     app.add_xp(10);
-                    if let Err(err) = app.save_persisted_state() {
-                        app.message = format!("학습 상태 저장 실패: {err}");
+                    if app.flush_pending_save() {
+                        app.start_quiz();
                     }
-                    app.start_quiz();
                 }
             }
             KeyCode::Char('q') | KeyCode::Char('Q') => app.start_quiz(),
@@ -691,10 +1012,10 @@ async fn handle_key_event(
                         None
                     }
                 });
-                if let Some(option_len) = choice_option_len {
-                    if app.selected_option + 1 < option_len {
-                        app.selected_option += 1;
-                    }
+                if let Some(option_len) = choice_option_len
+                    && app.selected_option + 1 < option_len
+                {
+                    app.selected_option += 1;
                 }
             }
             KeyCode::Enter => app.answer_current(),
@@ -716,9 +1037,7 @@ async fn handle_key_event(
                     Some(QuizAnswer::Text(_))
                 );
                 if is_text {
-                    if c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '\'' {
-                        app.typed_answer.push(c);
-                    }
+                    app.typed_answer.push(c);
                 }
             }
             _ => {}
@@ -739,14 +1058,25 @@ async fn handle_key_event(
         },
         Screen::Error => match key.code {
             KeyCode::Char('r') | KeyCode::Char('R') => {
+                if app.pending_persist && !app.flush_pending_save() {
+                    return;
+                }
                 if app.api_key.trim().is_empty() {
                     app.screen = Screen::ApiKeySetup;
                     app.focused = InputField::ApiKey;
+                    app.setup_editing = false;
                 } else {
                     app.start_main();
                 }
             }
-            KeyCode::Char('q') | KeyCode::Char('Q') => app.quit = true,
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                if app.pending_persist {
+                    app.message = "저장되지 않은 변경이 있습니다. R로 저장 재시도 후 종료해 주세요"
+                        .to_string();
+                } else {
+                    app.quit = true;
+                }
+            }
             _ => {}
         },
     }
@@ -771,25 +1101,31 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(1),
         ])
         .margin(2)
         .split(frame.area());
 
-    let title = Paragraph::new("English Vocab TUI")
+    let title = Paragraph::new("어휘 학습 TUI")
         .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL).title("API Key Setup"));
+        .block(Block::default().borders(Borders::ALL).title("초기 설정"));
 
     let api_value = if app.api_key.is_empty() {
         "(input your OpenAI API key)".to_string()
     } else {
         "*".repeat(app.api_key.len().min(40))
     };
-    let api_style = if matches!(app.focused, InputField::ApiKey) {
+    let api_style = if matches!(app.focused, InputField::ApiKey) && app.setup_editing {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else if matches!(app.focused, InputField::ApiKey) {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
@@ -798,8 +1134,38 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
         .style(api_style)
         .block(Block::default().borders(Borders::ALL).title("API Key"));
 
+    let profile_style = if matches!(app.focused, InputField::ProfileName) && app.setup_editing {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else if matches!(app.focused, InputField::ProfileName) {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let profile = Paragraph::new(app.profile_name.clone())
+        .style(profile_style)
+        .block(Block::default().borders(Borders::ALL).title("이름"));
+
+    let language_style = if matches!(app.focused, InputField::LearningLanguage) && app.setup_editing
+    {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else if matches!(app.focused, InputField::LearningLanguage) {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let language = Paragraph::new(app.learning_language.display_name_ko())
+        .style(language_style)
+        .block(Block::default().borders(Borders::ALL).title("학습 언어"));
+
     let help = Paragraph::new(vec![
-        Line::from("Enter: API Key 저장 후 메인 이동"),
+        Line::from("Up/Down: 항목 선택"),
+        Line::from("Enter: 선택 항목 편집 시작/종료"),
+        Line::from("S: 설정 저장 후 메인 이동"),
+        Line::from("(언어 편집 중 Left/Right, H/L 사용 가능)"),
         Line::from("Esc: 종료"),
         Line::from(app.message.clone()),
     ])
@@ -808,7 +1174,9 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
 
     frame.render_widget(title, areas[0]);
     frame.render_widget(api, areas[1]);
-    frame.render_widget(help, areas[2]);
+    frame.render_widget(profile, areas[2]);
+    frame.render_widget(language, areas[3]);
+    frame.render_widget(help, areas[4]);
 }
 
 fn draw_main(frame: &mut Frame<'_>, app: &App) {
@@ -823,29 +1191,47 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
         .margin(2)
         .split(frame.area());
 
-    let title = Paragraph::new("Main Menu")
+    let title = Paragraph::new("메인 메뉴")
         .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL).title("English Vocab TUI"));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("어휘 학습 TUI"),
+        );
 
-    let items: Vec<ListItem<'_>> = if app.topic_history.is_empty() {
-        vec![ListItem::new("저장된 주제가 없습니다. N으로 새 주제를 생성하세요.")]
+    let current_progress = app.current_progress();
+    let selected_topic = app.current_selected_topic();
+
+    let items: Vec<ListItem<'_>> = if current_progress.topic_history.is_empty() {
+        vec![ListItem::new(
+            "저장된 주제가 없습니다. N으로 새 주제를 생성하세요.",
+        )]
     } else {
-        app.topic_history
+        current_progress
+            .topic_history
             .iter()
             .enumerate()
             .map(|(idx, record)| {
-                let status = if record.passed { "passed" } else { "in progress" };
+                let status = if record.passed {
+                    "passed"
+                } else {
+                    "in progress"
+                };
                 let score = record
                     .last_score
                     .map(|(value, total)| format!("  score: {value}/{total}"))
                     .unwrap_or_default();
                 let line = format!(
                     "{}topic: {}  words: {}  status: {}{}",
-                    if idx == app.selected_topic { "> " } else { "  " },
+                    if idx == selected_topic {
+                        "> "
+                    } else {
+                        "  "
+                    },
                     record.topic,
                     record.words.len(),
                     status,
@@ -856,13 +1242,21 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
             .collect()
     };
 
-    let topic_list = List::new(items).block(Block::default().borders(Borders::ALL).title("Review Topics"));
+    let topic_list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("복습 주제 - {} 방", app.learning_language.display_name_ko())),
+    );
 
     let (level, current_level_xp, current_level_required, next_level_remaining) =
         level_progress_from_xp(app.total_xp);
 
     let profile = Paragraph::new(vec![
         Line::from(format!("이름: {}", app.profile_name)),
+        Line::from(format!(
+            "학습 언어: {}",
+            app.learning_language.display_name_ko()
+        )),
         Line::from(format!(
             "전체 XP: {} (다음 레벨까지 {} XP)",
             app.total_xp, next_level_remaining
@@ -871,19 +1265,24 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
             "레벨: {} (레벨 진행 {}/{})",
             level, current_level_xp, current_level_required
         )),
-        Line::from(format!("언어 실력(영어): {}", app.english_skill)),
+        Line::from(format!(
+            "언어 실력({}): {}",
+            app.learning_language.display_name_ko(),
+            app.current_skill()
+        )),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Profile"))
+    .block(Block::default().borders(Borders::ALL).title("프로필"))
     .wrap(Wrap { trim: true });
 
     let help = Paragraph::new(vec![
         Line::from("N: 새 주제 생성"),
         Line::from("Up/Down: 과거 주제 선택"),
+        Line::from("K: 설정(API Key/이름/언어)"),
         Line::from("S/Enter: 단어 학습 시작, Q: 시험 보기"),
         Line::from("Esc: 종료"),
         Line::from(app.message.clone()),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Actions"))
+    .block(Block::default().borders(Borders::ALL).title("동작"))
     .wrap(Wrap { trim: true });
 
     frame.render_widget(title, chunks[0]);
@@ -919,7 +1318,6 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(3),
             Constraint::Length(4),
             Constraint::Min(1),
         ])
@@ -934,41 +1332,22 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
         )
         .block(Block::default().borders(Borders::ALL).title("Create Topic"));
 
-    let topic_style = if matches!(app.focused, InputField::Topic) {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-    let topic_value = if app.topic.is_empty() {
-        "(예: travel conversation)".to_string()
-    } else {
-        app.topic.clone()
-    };
-    let topic = Paragraph::new(topic_value)
-        .style(topic_style)
-        .block(Block::default().borders(Borders::ALL).title("Topic"));
-
-    let count_style = if matches!(app.focused, InputField::Count) {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-    let count_value = if app.count_text.is_empty() {
-        "(5-20)".to_string()
-    } else {
-        app.count_text.clone()
-    };
-    let count = Paragraph::new(count_value)
-        .style(count_style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Word Count (5-20)"),
-        );
+    let info = Paragraph::new(vec![
+        Line::from("사용자 입력 없이 AI가 주제를 먼저 정합니다."),
+        Line::from(format!(
+            "주제 기반 단어를 항상 {}개 생성합니다.",
+            GENERATED_WORD_COUNT
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Auto Generation"),
+    )
+    .wrap(Wrap { trim: true });
 
     let help = Paragraph::new(vec![
-        Line::from("Tab: Topic/Count 이동"),
-        Line::from("Enter: 단어 생성 시작"),
+        Line::from("Enter: AI 생성 시작"),
         Line::from("M: 메인으로 이동"),
         Line::from("Esc: 종료"),
         Line::from(app.message.clone()),
@@ -977,9 +1356,8 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
     .wrap(Wrap { trim: true });
 
     frame.render_widget(title, areas[0]);
-    frame.render_widget(topic, areas[1]);
-    frame.render_widget(count, areas[2]);
-    frame.render_widget(help, areas[3]);
+    frame.render_widget(info, areas[1]);
+    frame.render_widget(help, areas[2]);
 }
 
 fn draw_loading(frame: &mut Frame<'_>, app: &App) {
@@ -1033,7 +1411,7 @@ fn draw_study(frame: &mut Frame<'_>, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("Word"));
 
     let meaning = Paragraph::new(word.meaning_ko.clone())
-        .block(Block::default().borders(Borders::ALL).title("Meaning (KR)"));
+        .block(Block::default().borders(Borders::ALL).title("뜻 (한국어)"));
 
     let help = Paragraph::new(vec![
         Line::from("Enter: 다음 단어"),
@@ -1074,11 +1452,10 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
     )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Quiz Mode - {}", quiz_type_label(question.quiz_type))),
-    );
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "Quiz Mode - {}",
+        quiz_type_label(question.quiz_type)
+    )));
 
     let prompt = Paragraph::new(question.prompt.clone())
         .block(Block::default().borders(Borders::ALL).title("Question"));
@@ -1177,8 +1554,11 @@ fn draw_result(frame: &mut Frame<'_>, app: &App) {
             .collect()
     };
 
-    let review = List::new(review_items)
-        .block(Block::default().borders(Borders::ALL).title("문제별 정오답"));
+    let review = List::new(review_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("문제별 정오답"),
+    );
 
     let help = Paragraph::new(vec![
         Line::from("M: 메인으로 이동"),
@@ -1307,6 +1687,7 @@ fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
         let question = match question_type {
             QuizType::MeaningChoice => {
                 let mut wrong_meanings = unique_meanings(words, index);
+                wrong_meanings.retain(|meaning| meaning.trim() != word.meaning_ko.trim());
                 wrong_meanings.shuffle(&mut rng);
 
                 let mut options = vec![word.meaning_ko.clone()];
@@ -1321,7 +1702,7 @@ fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
                 QuizQuestion {
                     quiz_type: QuizType::MeaningChoice,
                     target: word.term.clone(),
-                    prompt: format!("'{}'의 뜻을 고르세요", word.term),
+                    prompt: format!("'{}'의 한국어 뜻을 고르세요", word.term),
                     options,
                     answer: QuizAnswer::Choice(answer_index),
                 }
@@ -1340,7 +1721,7 @@ fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
                     .unwrap_or(0);
 
                 let prompt = format!(
-                    "빈칸에 들어갈 단어를 고르세요\n뜻: {}\n철자 힌트: {}",
+                    "빈칸에 들어갈 단어를 고르세요\n한국어 뜻: {}\n철자 힌트: {}",
                     word.meaning_ko,
                     mask_term(&word.term)
                 );
@@ -1357,7 +1738,7 @@ fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
                 quiz_type: QuizType::SpellingWrite,
                 target: word.term.clone(),
                 prompt: format!(
-                    "뜻을 보고 단어를 직접 입력하세요\n뜻: {}",
+                    "뜻을 보고 단어를 직접 입력하세요\n한국어 뜻: {}",
                     word.meaning_ko
                 ),
                 options: Vec::new(),
@@ -1373,25 +1754,69 @@ fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
 }
 
 fn normalize_term(term: &str) -> String {
-    term.trim().to_ascii_lowercase()
+    term.trim().to_lowercase()
 }
 
-fn is_single_word_term(term: &str) -> bool {
+fn is_japanese_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x309F
+            | 0x30A0..=0x30FF
+            | 0x31F0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+    )
+}
+
+fn is_chinese_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+    )
+}
+
+fn is_single_word_term(term: &str, language: LearningLanguage) -> bool {
     let trimmed = term.trim();
-    !trimmed.is_empty()
-        && trimmed
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match language {
+        LearningLanguage::English => trimmed
             .chars()
-            .all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
-        && !trimmed.contains(' ')
+            .all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\''),
+        LearningLanguage::Japanese => {
+            let chars: Vec<char> = trimmed.chars().collect();
+            let has_japanese = chars.iter().copied().any(is_japanese_char);
+            let has_ascii_alpha = chars.iter().any(|ch| ch.is_ascii_alphabetic());
+            has_japanese && !has_ascii_alpha
+        }
+        LearningLanguage::Chinese => {
+            let chars: Vec<char> = trimmed.chars().collect();
+            let has_chinese = chars.iter().copied().any(is_chinese_char);
+            let has_ascii_alpha = chars.iter().any(|ch| ch.is_ascii_alphabetic());
+            let has_japanese_syllabary = chars.iter().any(|ch| {
+                matches!(
+                    *ch as u32,
+                    0x3040..=0x309F
+                        | 0x30A0..=0x30FF
+                        | 0x31F0..=0x31FF
+                )
+            });
+            has_chinese && !has_ascii_alpha && !has_japanese_syllabary
+        }
+    }
 }
 
 async fn fetch_words(
     api_key: &str,
-    topic: &str,
     count: usize,
     excluded_terms: &[String],
-    english_skill: u32,
-) -> Result<Vec<WordItem>> {
+    language_skill: u32,
+    learning_language: LearningLanguage,
+) -> Result<GenerationResult> {
     let mut blocked = HashSet::new();
     for term in excluded_terms {
         let normalized = normalize_term(term);
@@ -1401,6 +1826,7 @@ async fn fetch_words(
     }
 
     let mut collected: Vec<WordItem> = Vec::with_capacity(count);
+    let mut generated_topic: Option<String> = None;
     const MAX_ATTEMPTS: usize = 6;
 
     for _ in 0..MAX_ATTEMPTS {
@@ -1410,10 +1836,20 @@ async fn fetch_words(
 
         let remaining = count - collected.len();
         let batch_count = remaining.saturating_add(4);
-        let batch = fetch_words_batch(api_key, topic, batch_count, english_skill).await?;
-        for item in batch {
+        let batch =
+            fetch_words_batch(api_key, batch_count, language_skill, learning_language).await?;
+        if generated_topic.is_none() {
+            let topic = batch.topic.trim();
+            if !topic.is_empty() {
+                generated_topic = Some(topic.to_string());
+            }
+        }
+        for item in batch.words {
             let key = normalize_term(&item.term);
-            if key.is_empty() || blocked.contains(&key) || !is_single_word_term(&item.term) {
+            if key.is_empty()
+                || blocked.contains(&key)
+                || !is_single_word_term(&item.term, learning_language)
+            {
                 continue;
             }
             blocked.insert(key);
@@ -1431,18 +1867,25 @@ async fn fetch_words(
         );
     }
 
-    Ok(collected)
+    Ok(GenerationResult {
+        topic: generated_topic.unwrap_or_else(|| "AI 추천 주제".to_string()),
+        words: collected,
+    })
 }
 
 async fn fetch_words_batch(
     api_key: &str,
-    topic: &str,
     count: usize,
-    english_skill: u32,
-) -> Result<Vec<WordItem>> {
+    language_skill: u32,
+    learning_language: LearningLanguage,
+) -> Result<GenerationPayload> {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
+            "topic": {
+                "type": "string",
+                "minLength": 1
+            },
             "words": {
                 "type": "array",
                 "minItems": count,
@@ -1452,7 +1895,7 @@ async fn fetch_words_batch(
                     "properties": {
                         "term": {
                             "type": "string",
-                            "pattern": "^[A-Za-z]+(?:[-'][A-Za-z]+)*$"
+                            "minLength": 1
                         },
                         "meaning_ko": {"type": "string"}
                     },
@@ -1461,12 +1904,22 @@ async fn fetch_words_batch(
                 }
             }
         },
-        "required": ["words"],
+        "required": ["topic", "words"],
         "additionalProperties": false
     });
 
     let user_prompt = format!(
-        "주제: {topic}\n현재 사용자 영어 실력 레벨: {english_skill}\n주제에 맞는 실용 영어 단어를 정확히 {count}개 생성하세요. term은 반드시 한 단어만 허용되며 공백이 들어간 문장/구는 절대 금지입니다. 각 항목은 term(영단어)과 meaning_ko(짧고 명확한 한국어 뜻)만 포함하세요."
+        "Current learner {} skill level: {language_skill}.\nChoose one practical topic and write `topic` in {}.\nGenerate exactly {count} vocabulary items. Each `term` must be exactly one {} word and must not contain spaces.\n`meaning_ko` must be concise Korean meaning.",
+        learning_language.term_language_name(),
+        LearningLanguage::topic_language_name(),
+        learning_language.term_language_name()
+    );
+
+    let system_prompt = format!(
+        "You are a fast vocabulary generator for Korean learners. Return only JSON matching schema. `topic` must be in {}. Every `term` must be one {} word with no spaces. `meaning_ko` must be Korean. Difficulty should adapt to the user's {} skill level.",
+        LearningLanguage::topic_language_name(),
+        learning_language.term_language_name(),
+        learning_language.term_language_name()
     );
 
     let request_body = ChatCompletionRequest {
@@ -1474,7 +1927,7 @@ async fn fetch_words_batch(
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: "You are a fast vocabulary generator for Korean learners. Return only JSON that matches the schema. Every term must be exactly one English word (no spaces, no phrases, no full sentences). Difficulty should adapt to the user's English skill level.",
+                content: &system_prompt,
             },
             ChatMessage {
                 role: "user",
@@ -1521,14 +1974,15 @@ async fn fetch_words_batch(
         .and_then(|choice| choice.message.content.clone())
         .ok_or_else(|| anyhow!("OpenAI 응답에 content가 없습니다"))?;
 
-    let payload: WordPayload = serde_json::from_str(&content).context("단어 JSON 파싱 실패")?;
+    let payload: GenerationPayload =
+        serde_json::from_str(&content).context("단어 JSON 파싱 실패")?;
     if payload.words.len() != count {
         bail!(
             "요청한 단어 수와 응답 단어 수가 다릅니다: 요청 {count}, 응답 {}",
             payload.words.len()
         );
     }
-    Ok(payload.words)
+    Ok(payload)
 }
 
 fn state_file_path() -> Result<PathBuf> {
