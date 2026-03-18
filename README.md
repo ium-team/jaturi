@@ -10,6 +10,8 @@
 - 단어 학습(뜻 확인) 후 바로 퀴즈로 복습
 - 언어별 진행도/점수/XP를 로컬에 저장
 - 주제 생성 시 단어 수는 항상 `10`개
+- 퀴즈 점수 90점 이상 시 실력 보상(+1), 100점 달성 시 추가 +1 (주제별 1회)
+- 학습 XP는 같은 주제 첫 완료 `+10`, 재학습 완료 `+5`
 
 ## 다운로드 및 전역 설치 (운영체제별)
 
@@ -20,7 +22,7 @@
 ### Linux (x86_64)
 
 ```bash
-VERSION="v0.1.4"
+VERSION="v0.1.5"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 chmod +x install.sh
@@ -32,7 +34,7 @@ jaturi
 ### macOS (Apple Silicon)
 
 ```bash
-VERSION="v0.1.4"
+VERSION="v0.1.5"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 chmod +x install.sh
@@ -44,7 +46,7 @@ jaturi
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-$Version = "v0.1.4"
+$Version = "v0.1.5"
 Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
 Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
 .\install.ps1
@@ -79,6 +81,13 @@ jaturi
 
 - 객관식: `Up/Down` 선택, `Enter` 제출
 - 주관식(스펠링): 입력 후 `Enter` 제출
+- 점수 90점 이상이면 해당 주제 실력 `+1`
+- 같은 주제에서 100점을 추가 달성하면 실력 `+1` 추가 (총 +2)
+
+### XP 규칙
+
+- 학습 완료 XP: 해당 주제 첫 완료 `+10`, 재학습 완료 `+5`
+- 퀴즈 완료 XP: 항상 `+5`
 
 ### 5) 결과/복습
 

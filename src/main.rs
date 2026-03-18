@@ -193,6 +193,10 @@ struct TopicRecord {
     words: Vec<WordItem>,
     last_score: Option<(usize, usize)>,
     passed: bool,
+    #[serde(default)]
+    skill_reward_stage: u8,
+    #[serde(default)]
+    study_completed_once: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -499,6 +503,9 @@ impl App {
                         .iter()
                         .all(|word| is_single_word_term(&word.term, language))
             });
+            for record in &mut progress.topic_history {
+                record.skill_reward_stage = record.skill_reward_stage.min(2);
+            }
             if progress.topic_history.is_empty() {
                 progress.selected_topic = 0;
             } else {
@@ -672,6 +679,8 @@ impl App {
                 words,
                 last_score: None,
                 passed: false,
+                skill_reward_stage: 0,
+                study_completed_once: false,
             });
             let index = progress.topic_history.len() - 1;
             progress.selected_topic = index;
@@ -715,24 +724,37 @@ impl App {
             let total = self.quiz_questions.len();
             if total > 0 {
                 let score = self.score;
-                let passed = score * 100 >= total * 70;
+                let passed = score * 100 >= total * 90;
                 self.add_xp(5);
-                let should_increase_skill = {
-                    let progress = self.current_progress();
-                    passed && !progress.topic_history.iter().any(|record| record.passed)
+                let current_stage = self
+                    .current_progress()
+                    .topic_history
+                    .get(active)
+                    .map(|record| record.skill_reward_stage)
+                    .unwrap_or(0)
+                    .min(2);
+                let target_stage: u8 = if score == total {
+                    2
+                } else if passed {
+                    1
+                } else {
+                    0
                 };
-                if should_increase_skill {
+                let skill_gain = u32::from(target_stage.saturating_sub(current_stage));
+                if skill_gain > 0 {
                     let progress = self.current_progress_mut();
-                    progress.skill = progress.skill.saturating_add(1);
+                    progress.skill = progress.skill.saturating_add(skill_gain);
                 }
                 if let Some(record) = self.current_progress_mut().topic_history.get_mut(active) {
                     record.last_score = Some((score, total));
-                    record.passed = passed;
+                    record.passed = record.passed || passed;
+                    record.skill_reward_stage = record.skill_reward_stage.max(target_stage);
                 }
-                self.message = if should_increase_skill {
+                self.message = if skill_gain > 0 {
                     format!(
-                        "복습 완료! +5 XP, {} 실력 +1",
-                        self.learning_language.display_name_ko()
+                        "복습 완료! +5 XP, {} 실력 +{}",
+                        self.learning_language.display_name_ko(),
+                        skill_gain
                     )
                 } else {
                     "복습 완료! +5 XP".to_string()
@@ -742,6 +764,28 @@ impl App {
         }
         self.screen = Screen::Result;
         self.flush_pending_save();
+    }
+
+    fn reward_study_completion(&mut self) {
+        let xp_gain = if let Some(active_topic) = self.active_topic {
+            let already_completed = self
+                .current_progress()
+                .topic_history
+                .get(active_topic)
+                .map(|record| record.study_completed_once)
+                .unwrap_or(false);
+            if let Some(record) = self
+                .current_progress_mut()
+                .topic_history
+                .get_mut(active_topic)
+            {
+                record.study_completed_once = true;
+            }
+            if already_completed { 5 } else { 10 }
+        } else {
+            10
+        };
+        self.add_xp(xp_gain);
     }
 
     fn start_main(&mut self) {
@@ -1027,7 +1071,7 @@ async fn handle_key_event(
                 if app.study_index + 1 < app.words.len() {
                     app.study_index += 1;
                 } else {
-                    app.add_xp(10);
+                    app.reward_study_completion();
                     if app.flush_pending_save() {
                         app.start_quiz();
                     }
