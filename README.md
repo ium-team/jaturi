@@ -1,94 +1,86 @@
-# jaturi (Rust)
+# jaturi
 
-OpenAI `gpt-4o-mini`를 사용해 영어 단어를 생성하고, TUI에서 학습/퀴즈를 진행하는 프로그램입니다.
+`jaturi`는 OpenAI를 사용해 단어를 자동 생성하고, 터미널에서 학습과 퀴즈를 진행하는 언어 학습 앱입니다.
 
-## 기능
+## 이 서비스가 하는 일
 
-- 사용자 입력 API Key로 OpenAI 호출
-- AI가 학습 주제(Topic) 자동 생성
-- 생성 단어 수는 항상 `10`개로 고정
-- 학습 모드: 단어/뜻/예문 확인
-- 퀴즈 모드: 객관식 의미 맞추기
+- API Key를 입력하면 AI가 학습 주제와 단어를 자동 생성
+- 단어 학습(뜻 확인) 후 바로 퀴즈로 복습
+- 언어별 진행도/점수/XP를 로컬에 저장
+- 주제 생성 시 단어 수는 항상 `10`개
 
-## 실행
+## 다운로드 (운영체제별)
 
-```bash
-cargo run
-```
+릴리스 페이지: `https://github.com/ium-team/jaturi/releases/tag/v0.1.2`
 
-## 배포(다른 사람에게 공유)
-
-이 프로젝트는 GitHub Actions 릴리스 워크플로우가 설정되어 있어, 태그를 푸시하면 OS별 실행 파일이 자동으로 올라갑니다.
-
-1. 버전 태그 생성
+### Linux (x86_64)
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+curl -LO https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-x86_64-unknown-linux-musl.tar.gz
+tar -xzf jaturi-v0.1.2-x86_64-unknown-linux-musl.tar.gz
+chmod +x jaturi
+./jaturi
 ```
 
-`git tag`만 로컬에서 만들면 실행되지 않고, 반드시 `git push origin v0.1.1`까지 해야 워크플로우가 실행됩니다.
+### macOS (Apple Silicon)
 
-2. GitHub `Releases`에서 생성된 파일 다운로드
+```bash
+curl -LO https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-aarch64-apple-darwin.tar.gz
+tar -xzf jaturi-v0.1.2-aarch64-apple-darwin.tar.gz
+chmod +x jaturi
+./jaturi
+```
 
-- Linux(정적 링크): `jaturi-v0.1.1-x86_64-unknown-linux-musl.tar.gz`
-- macOS(Apple Silicon): `jaturi-v0.1.1-aarch64-apple-darwin.tar.gz`
-- Windows: `jaturi-v0.1.1-x86_64-pc-windows-msvc.zip`
+### Windows (x86_64, PowerShell)
 
-3. 압축 해제 후 실행
+```powershell
+Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-v0.1.2-x86_64-pc-windows-msvc.zip"
+Expand-Archive -Path "jaturi-v0.1.2-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
+.\jaturi.exe
+```
 
-- Linux/macOS: `./jaturi`
-- Windows: `jaturi.exe`
+참고:
+- 터미널 기반 앱(TUI)이므로 반드시 터미널에서 실행하세요.
+- macOS/Windows는 서명되지 않은 앱 경고가 보일 수 있습니다.
 
-참고: 터미널 기반 앱(TUI)이므로 터미널에서 실행해야 합니다.
+## 사용 방법
 
-4. 무결성 검증(권장)
+### 1) 처음 실행
 
-- 릴리스의 `SHA256SUMS.txt`를 함께 내려받아 체크섬을 비교하세요.
+- `API Key`, `이름`, `학습 언어`를 입력하고 `S`로 저장
+- 저장 후 메인 화면으로 이동
 
-5. 플랫폼 보안 경고 참고
+### 2) 주제 생성
 
-- macOS/Windows에서 서명되지 않은 바이너리 경고(Gatekeeper/SmartScreen)가 나타날 수 있습니다.
+- 메인에서 `N` 눌러 주제 생성 화면 이동
+- `Enter`를 누르면 AI가 주제 + 단어 10개 자동 생성
 
-## 릴리스 자동 빌드
+### 3) 학습
 
-- 워크플로우 파일: `.github/workflows/release.yml`
-- 트리거: `v*` 형태 태그 푸시 또는 수동 실행(`workflow_dispatch`)
-- 산출물: Linux/macOS/Windows 실행 파일 + README 포함 압축본 + `SHA256SUMS.txt`
+- 단어/뜻을 보고 `Enter`로 다음 단어 이동
+- 필요하면 `Q`로 바로 퀴즈 시작
 
-## 리네이밍 참고
+### 4) 퀴즈
 
-- 서비스 이름이 `vocab_tui`에서 `jaturi`로 변경되었습니다.
-- 앱 저장 데이터는 기존 `vocab_tui/state.bin`이 있으면 첫 실행 시 `jaturi/state.bin`으로 자동 마이그레이션됩니다.
+- 객관식: `Up/Down` 선택, `Enter` 제출
+- 주관식(스펠링): 입력 후 `Enter` 제출
 
-## TUI 조작
+### 5) 결과/복습
 
-- API Key 설정 화면
-  - `Enter`: API Key 저장 후 메인 이동
-  - `Esc`: 종료
-- 주제 생성 화면
-  - `Enter`: AI 주제/단어 생성 시작
-  - `M`: 메인으로 이동
-  - `Esc`: 종료
-- 학습 화면
-  - `Enter`: 다음 단어
-  - `Q`: 바로 퀴즈 시작
-- 퀴즈 화면
-  - `Up/Down`: 보기 선택
-  - `Enter`: 답 제출
-- 결과/에러 화면
-  - `R`: 처음(설정)으로 돌아가기
-  - `Q`: 종료
+- 결과 화면에서 `M`(메인), `S`(같은 주제 학습), `Q`(같은 주제 퀴즈)
 
-## 입력 규칙
+## 키 조작 요약
 
-- Word Count는 사용자 입력 없이 `10`개로 고정
-- API Key가 비어 있으면 요청하지 않음
+- 공통: `Esc` 종료
+- 설정 화면: `Up/Down`, `Tab` 이동, `Enter` 편집 시작/종료, `S` 저장
+- 메인 화면: `N` 새 주제, `S`/`Enter` 학습, `Q` 퀴즈, `K` 설정
+- 주제 생성: `Enter` 생성 시작, `M` 메인 복귀
+- 학습: `Enter` 다음 단어, `Q` 퀴즈
+- 퀴즈: 객관식 `Up/Down + Enter`, 주관식 `입력 + Enter`
+- 결과: `M` 메인, `S` 학습, `Q` 퀴즈
+- 에러: `R` 복구/재시도, `Q` 종료
 
-## OpenAI 응답 형식
+## 데이터 저장
 
-프로그램은 JSON Schema를 강제하여 아래 필드를 받습니다.
-
-- `topic`
-- `term`
-- `meaning_ko`
+- 학습 데이터는 OS의 사용자 데이터 디렉터리에 저장됩니다.
+- 기존 `vocab_tui` 데이터를 사용 중이었다면 첫 실행 시 `jaturi` 경로로 자동 마이그레이션됩니다.
