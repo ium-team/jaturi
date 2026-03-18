@@ -9,38 +9,50 @@
 - 언어별 진행도/점수/XP를 로컬에 저장
 - 주제 생성 시 단어 수는 항상 `10`개
 
-## 다운로드 (운영체제별)
+## 다운로드 및 전역 설치 (운영체제별)
 
-릴리스 페이지: `https://github.com/ium-team/jaturi/releases/tag/v0.1.2`
+릴리스 페이지: `https://github.com/ium-team/jaturi/releases/latest`
+
+압축을 풀고 설치 스크립트를 1번 실행하면, PATH에 등록되어 어느 경로에서든 `jaturi`를 실행할 수 있습니다.
 
 ### Linux (x86_64)
 
 ```bash
-curl -LO https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-x86_64-unknown-linux-musl.tar.gz
-tar -xzf jaturi-v0.1.2-x86_64-unknown-linux-musl.tar.gz
-chmod +x jaturi
-./jaturi
+VERSION="v0.1.3"
+curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+chmod +x install.sh
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+jaturi
 ```
 
 ### macOS (Apple Silicon)
 
 ```bash
-curl -LO https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-aarch64-apple-darwin.tar.gz
-tar -xzf jaturi-v0.1.2-aarch64-apple-darwin.tar.gz
-chmod +x jaturi
-./jaturi
+VERSION="v0.1.3"
+curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
+tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
+chmod +x install.sh
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+jaturi
 ```
 
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/v0.1.2/jaturi-v0.1.2-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-v0.1.2-x86_64-pc-windows-msvc.zip"
-Expand-Archive -Path "jaturi-v0.1.2-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
-.\jaturi.exe
+$Version = "v0.1.3"
+Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
+Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
+.\install.ps1
+jaturi
 ```
 
 참고:
 - 터미널 기반 앱(TUI)이므로 반드시 터미널에서 실행하세요.
+- Linux/macOS는 기본적으로 `~/.local/bin`, Windows는 `%LOCALAPPDATA%\Programs\jaturi\bin`에 설치됩니다.
+- PATH 반영을 위해 터미널을 새로 열어야 할 수 있습니다.
 - macOS/Windows는 서명되지 않은 앱 경고가 보일 수 있습니다.
 
 ## 사용 방법

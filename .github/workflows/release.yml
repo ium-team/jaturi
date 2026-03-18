@@ -55,8 +55,10 @@ jobs:
           OUT_NAME="jaturi-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
+          cp "scripts/install.sh" "dist/install.sh"
+          chmod +x "dist/install.sh"
           cp README.md dist/README.md
-          tar -C dist -czf "${OUT_NAME}.tar.gz" "${BIN_NAME}" "README.md"
+          tar -C dist -czf "${OUT_NAME}.tar.gz" "${BIN_NAME}" "install.sh" "README.md"
           test -f "${OUT_NAME}.tar.gz"
 
       - name: Package archive (windows)
@@ -67,8 +69,9 @@ jobs:
           $OutName = "jaturi-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$BinName" "dist/$BinName"
+          Copy-Item "scripts/install.ps1" "dist/install.ps1"
           Copy-Item "README.md" "dist/README.md"
-          Compress-Archive -Path "dist/$BinName", "dist/README.md" -DestinationPath "$OutName.zip" -Force
+          Compress-Archive -Path "dist/$BinName", "dist/install.ps1", "dist/README.md" -DestinationPath "$OutName.zip" -Force
           if (-not (Test-Path "$OutName.zip")) { throw "Missing archive: $OutName.zip" }
 
       - name: Upload artifact
