@@ -773,6 +773,28 @@ impl App {
         terms
     }
 
+    fn recent_topics(&self, limit: usize) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut topics = Vec::new();
+
+        for record in self.current_progress().topic_history.iter().rev() {
+            let topic = record.topic.trim();
+            if topic.is_empty() {
+                continue;
+            }
+            let normalized = normalize_topic(topic);
+            if normalized.is_empty() || !seen.insert(normalized) {
+                continue;
+            }
+            topics.push(topic.to_string());
+            if topics.len() >= limit {
+                break;
+            }
+        }
+
+        topics
+    }
+
     fn start_quiz(&mut self) {
         self.quiz_questions = build_quiz_questions(&self.words, self.learning_language);
         self.quiz_reviews.clear();
@@ -978,6 +1000,8 @@ async fn handle_key_event(
                 let api_key = app.api_key.clone();
                 let excluded_terms = app.known_terms();
                 let language_skill = app.current_skill();
+                let current_level = level_progress_from_xp(app.total_xp).0;
+                let recent_topics = app.recent_topics(10);
                 let learning_language = app.learning_language;
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -986,6 +1010,8 @@ async fn handle_key_event(
                         GENERATED_WORD_COUNT,
                         &excluded_terms,
                         language_skill,
+                        current_level,
+                        &recent_topics,
                         learning_language,
                     )
                     .await;
@@ -1249,11 +1275,7 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("jaturi"),
-        );
+        .block(Block::default().borders(Borders::ALL).title("jaturi"));
 
     let current_progress = app.current_progress();
     let selected_topic = app.current_selected_topic();
@@ -1817,6 +1839,27 @@ fn normalize_term(term: &str) -> String {
     term.trim().to_lowercase()
 }
 
+fn normalize_topic(topic: &str) -> String {
+    topic.trim().to_lowercase()
+}
+
+fn language_skill_band(language_skill: u32) -> &'static str {
+    match language_skill {
+        0..=2 => "beginner",
+        3..=6 => "elementary",
+        7..=11 => "intermediate",
+        _ => "advanced",
+    }
+}
+
+fn app_level_band(level: u32) -> &'static str {
+    match level {
+        1..=3 => "beginner",
+        4..=7 => "intermediate",
+        _ => "advanced",
+    }
+}
+
 fn is_japanese_char(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -1875,6 +1918,8 @@ async fn fetch_words(
     count: usize,
     excluded_terms: &[String],
     language_skill: u32,
+    current_level: u32,
+    recent_topics: &[String],
     learning_language: LearningLanguage,
 ) -> Result<GenerationResult> {
     let mut blocked = HashSet::new();
@@ -1882,6 +1927,14 @@ async fn fetch_words(
         let normalized = normalize_term(term);
         if !normalized.is_empty() {
             blocked.insert(normalized);
+        }
+    }
+
+    let mut blocked_topics = HashSet::new();
+    for topic in recent_topics {
+        let normalized = normalize_topic(topic);
+        if !normalized.is_empty() {
+            blocked_topics.insert(normalized);
         }
     }
 
@@ -1896,14 +1949,32 @@ async fn fetch_words(
 
         let remaining = count - collected.len();
         let batch_count = remaining.saturating_add(4);
-        let batch =
-            fetch_words_batch(api_key, batch_count, language_skill, learning_language).await?;
+        let batch = fetch_words_batch(
+            api_key,
+            batch_count,
+            language_skill,
+            current_level,
+            generated_topic.as_deref(),
+            recent_topics,
+            learning_language,
+        )
+        .await?;
+
+        let topic = batch.topic.trim();
+        let topic_key = normalize_topic(topic);
+
         if generated_topic.is_none() {
-            let topic = batch.topic.trim();
-            if !topic.is_empty() {
-                generated_topic = Some(topic.to_string());
+            if topic.is_empty() || blocked_topics.contains(&topic_key) {
+                continue;
+            }
+            generated_topic = Some(topic.to_string());
+        } else if let Some(active_topic) = &generated_topic {
+            let active_key = normalize_topic(active_topic);
+            if !topic_key.is_empty() && topic_key != active_key {
+                continue;
             }
         }
+
         for item in batch.words {
             let key = normalize_term(&item.term);
             if key.is_empty()
@@ -1921,9 +1992,10 @@ async fn fetch_words(
     }
 
     if collected.len() != count {
+        let used_topic = generated_topic.unwrap_or_else(|| "(주제 없음)".to_string());
         bail!(
-            "중복 없는 새 단어를 충분히 만들지 못했습니다: 요청 {count}, 생성 {}",
-            collected.len()
+            "중복 없는 새 단어를 충분히 만들지 못했습니다: 요청 {count}, 생성 {}. 최근 주제와 겹치지 않는 주제/단어가 부족할 수 있습니다. 생성된 주제: {used_topic}",
+            collected.len(),
         );
     }
 
@@ -1937,6 +2009,9 @@ async fn fetch_words_batch(
     api_key: &str,
     count: usize,
     language_skill: u32,
+    current_level: u32,
+    fixed_topic: Option<&str>,
+    recent_topics: &[String],
     learning_language: LearningLanguage,
 ) -> Result<GenerationPayload> {
     let schema = serde_json::json!({
@@ -1968,18 +2043,36 @@ async fn fetch_words_batch(
         "additionalProperties": false
     });
 
+    let recent_topics_json =
+        serde_json::to_string(recent_topics).context("최근 주제 직렬화 실패")?;
+    let topic_instruction = if let Some(topic) = fixed_topic {
+        format!(
+            "Use this exact topic for `topic`: \"{}\". Keep generating new words within this same topic.",
+            topic.trim()
+        )
+    } else {
+        format!(
+            "Choose one practical topic and write `topic` in {}. The topic must be semantically different from all recent topics.",
+            LearningLanguage::topic_language_name()
+        )
+    };
+
     let user_prompt = format!(
-        "Current learner {} skill level: {language_skill}.\nChoose one practical topic and write `topic` in {}.\nGenerate exactly {count} vocabulary items. Each `term` must be exactly one {} word and must not contain spaces.\n`meaning_ko` must be concise Korean meaning.",
+        "Learner profile:\n- Learning language: {}\n- Language skill score: {} ({})\n- App level: {} ({})\n- Recent 10 topics to avoid: {}\n\n{}\nGenerate exactly {count} vocabulary items.\nEach `term` must be exactly one {} word and must not contain spaces.\n`meaning_ko` must be concise Korean meaning.\nDo not include words already used in beginner textbooks too frequently unless essential for the topic.",
         learning_language.term_language_name(),
-        LearningLanguage::topic_language_name(),
+        language_skill,
+        language_skill_band(language_skill),
+        current_level,
+        app_level_band(current_level),
+        recent_topics_json,
+        topic_instruction,
         learning_language.term_language_name()
     );
 
     let system_prompt = format!(
-        "You are a fast vocabulary generator for Korean learners. Return only JSON matching schema. `topic` must be in {}. Every `term` must be one {} word with no spaces. `meaning_ko` must be Korean. Difficulty should adapt to the user's {} skill level.",
+        "You are a strict vocabulary generator for Korean learners. Return only JSON matching schema. `topic` must be in {}. Every `term` must be one {} word with no spaces. `meaning_ko` must be Korean. Match vocabulary difficulty to both language skill score and app level. Never choose a topic that overlaps with the provided recent topics.",
         LearningLanguage::topic_language_name(),
         learning_language.term_language_name(),
-        learning_language.term_language_name()
     );
 
     let request_body = ChatCompletionRequest {
