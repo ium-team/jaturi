@@ -22,7 +22,7 @@
 ### Linux (x86_64)
 
 ```bash
-VERSION="v0.1.5"
+VERSION="v0.1.6"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 chmod +x install.sh
@@ -34,7 +34,7 @@ jaturi
 ### macOS (Apple Silicon)
 
 ```bash
-VERSION="v0.1.5"
+VERSION="v0.1.6"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 chmod +x install.sh
@@ -46,7 +46,7 @@ jaturi
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-$Version = "v0.1.5"
+$Version = "v0.1.6"
 Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
 Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
 .\install.ps1
@@ -58,6 +58,25 @@ jaturi
 - Linux/macOS는 기본적으로 `~/.local/bin`, Windows는 `%LOCALAPPDATA%\Programs\jaturi\bin`에 설치됩니다.
 - PATH 반영을 위해 터미널을 새로 열어야 할 수 있습니다.
 - macOS/Windows는 서명되지 않은 앱 경고가 보일 수 있습니다.
+
+### 설치 후 버전 확인 (중요)
+
+- 설치 직후 버전을 확인하세요:
+  - Linux/macOS: `jaturi --version`
+  - Windows PowerShell: `jaturi --version`
+- 현재 어떤 실행 파일을 쓰는지 확인:
+  - Linux/macOS: `command -v jaturi`
+  - Windows PowerShell: `(Get-Command jaturi).Source`
+- 릴리스 파일 무결성 확인(선택): `SHA256SUMS.txt`와 로컬 바이너리 해시를 비교
+
+Linux 예시:
+
+```bash
+sha256sum ~/.local/bin/jaturi
+curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.6/SHA256SUMS.txt
+```
+
+버전이 다르면 같은 폴더(압축 해제 폴더)에서 `./install.sh` 또는 `./install.ps1`를 다시 실행해 덮어설치하세요.
 
 ## 사용 방법
 

@@ -908,10 +908,35 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(exit_code) = handle_cli_args() {
+        std::process::exit(exit_code);
+    }
     let terminal = setup_terminal().context("터미널 초기화 실패")?;
     let result = run(terminal).await;
     restore_terminal().context("터미널 복구 실패")?;
     result
+}
+
+fn handle_cli_args() -> Option<i32> {
+    let mut args = env::args();
+    let _program = args.next();
+    match args.next().as_deref() {
+        Some("--version") | Some("-V") => {
+            println!("jaturi {}", env!("CARGO_PKG_VERSION"));
+            Some(0)
+        }
+        Some("--help") | Some("-h") => {
+            println!(
+                "jaturi\n\nOptions:\n  -V, --version  Print version\n  -h, --help     Print help"
+            );
+            Some(0)
+        }
+        Some(other) => {
+            eprintln!("Unknown option: {other}. Use --help for usage.");
+            Some(2)
+        }
+        None => None,
+    }
 }
 
 async fn run(mut terminal: DefaultTerminal) -> Result<()> {
