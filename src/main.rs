@@ -501,7 +501,9 @@ impl App {
             if progress.topic_history.is_empty() {
                 progress.selected_topic = 0;
             } else {
-                progress.selected_topic = progress.selected_topic.min(progress.topic_history.len() - 1);
+                progress.selected_topic = progress
+                    .selected_topic
+                    .min(progress.topic_history.len() - 1);
             }
         }
     }
@@ -648,7 +650,9 @@ impl App {
             progress.selected_topic = 0;
             return;
         }
-        progress.selected_topic = progress.selected_topic.min(progress.topic_history.len() - 1);
+        progress.selected_topic = progress
+            .selected_topic
+            .min(progress.topic_history.len() - 1);
     }
 
     fn normalize_selection(&mut self) {
@@ -1094,7 +1098,9 @@ async fn handle_key_event(
 }
 
 fn strip_newlines(text: &str) -> String {
-    text.chars().filter(|ch| *ch != '\n' && *ch != '\r').collect()
+    text.chars()
+        .filter(|ch| *ch != '\n' && *ch != '\r')
+        .collect()
 }
 
 fn handle_paste_event(text: &str, app: &mut App) {
@@ -1272,11 +1278,7 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
                     .unwrap_or_default();
                 let line = format!(
                     "{}topic: {}  words: {}  status: {}{}",
-                    if idx == selected_topic {
-                        "> "
-                    } else {
-                        "  "
-                    },
+                    if idx == selected_topic { "> " } else { "  " },
                     record.topic,
                     record.words.len(),
                     status,
@@ -1287,11 +1289,10 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
             .collect()
     };
 
-    let topic_list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("복습 주제 - {} 방", app.learning_language.display_name_ko())),
-    );
+    let topic_list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+        "복습 주제 - {} 방",
+        app.learning_language.display_name_ko()
+    )));
 
     let (level, current_level_xp, current_level_required, next_level_remaining) =
         level_progress_from_xp(app.total_xp);
@@ -1718,12 +1719,18 @@ fn unique_meanings(words: &[WordItem], exclude_index: usize) -> Vec<String> {
     items
 }
 
-fn build_quiz_questions(words: &[WordItem], learning_language: LearningLanguage) -> Vec<QuizQuestion> {
+fn build_quiz_questions(
+    words: &[WordItem],
+    learning_language: LearningLanguage,
+) -> Vec<QuizQuestion> {
     let mut rng = rand::rng();
     let mut questions = Vec::with_capacity(words.len());
 
     for (index, word) in words.iter().enumerate() {
-        let question_type = if matches!(learning_language, LearningLanguage::Japanese | LearningLanguage::Chinese) {
+        let question_type = if matches!(
+            learning_language,
+            LearningLanguage::Japanese | LearningLanguage::Chinese
+        ) {
             match rng.random_range(0..2) {
                 0 => QuizType::MeaningChoice,
                 _ => QuizType::FillBlankChoice,
