@@ -1,5 +1,5 @@
 [package]
-name = "vocab_tui"
+name = "jaturi"
 version = "0.1.0"
 edition = "2024"
 

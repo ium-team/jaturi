@@ -1,4 +1,4 @@
-# Vocab TUI (Rust)
+# jaturi (Rust)
 
 OpenAI `gpt-4o-mini`를 사용해 영어 단어를 생성하고, TUI에서 학습/퀴즈를 진행하는 프로그램입니다.
 
@@ -23,22 +23,22 @@ cargo run
 1. 버전 태그 생성
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-`git tag`만 로컬에서 만들면 실행되지 않고, 반드시 `git push origin v0.1.0`까지 해야 워크플로우가 실행됩니다.
+`git tag`만 로컬에서 만들면 실행되지 않고, 반드시 `git push origin v0.1.1`까지 해야 워크플로우가 실행됩니다.
 
 2. GitHub `Releases`에서 생성된 파일 다운로드
 
-- Linux(정적 링크): `vocab_tui-v0.1.0-x86_64-unknown-linux-musl.tar.gz`
-- macOS(Apple Silicon): `vocab_tui-v0.1.0-aarch64-apple-darwin.tar.gz`
-- Windows: `vocab_tui-v0.1.0-x86_64-pc-windows-msvc.zip`
+- Linux(정적 링크): `jaturi-v0.1.1-x86_64-unknown-linux-musl.tar.gz`
+- macOS(Apple Silicon): `jaturi-v0.1.1-aarch64-apple-darwin.tar.gz`
+- Windows: `jaturi-v0.1.1-x86_64-pc-windows-msvc.zip`
 
 3. 압축 해제 후 실행
 
-- Linux/macOS: `./vocab_tui`
-- Windows: `vocab_tui.exe`
+- Linux/macOS: `./jaturi`
+- Windows: `jaturi.exe`
 
 참고: 터미널 기반 앱(TUI)이므로 터미널에서 실행해야 합니다.
 
@@ -55,6 +55,11 @@ git push origin v0.1.0
 - 워크플로우 파일: `.github/workflows/release.yml`
 - 트리거: `v*` 형태 태그 푸시 또는 수동 실행(`workflow_dispatch`)
 - 산출물: Linux/macOS/Windows 실행 파일 + README 포함 압축본 + `SHA256SUMS.txt`
+
+## 리네이밍 참고
+
+- 서비스 이름이 `vocab_tui`에서 `jaturi`로 변경되었습니다.
+- 앱 저장 데이터는 기존 `vocab_tui/state.bin`이 있으면 첫 실행 시 `jaturi/state.bin`으로 자동 마이그레이션됩니다.
 
 ## TUI 조작
 

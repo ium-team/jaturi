@@ -268,7 +268,8 @@ struct PersistedStateV5 {
 }
 
 const STATE_VERSION: u8 = 5;
-const STATE_DIR_NAME: &str = "vocab_tui";
+const STATE_DIR_NAME: &str = "jaturi";
+const LEGACY_STATE_DIR_NAME: &str = "vocab_tui";
 const STATE_FILE_NAME: &str = "state.bin";
 const GENERATED_WORD_COUNT: usize = 10;
 
@@ -1159,7 +1160,7 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
         .margin(2)
         .split(frame.area());
 
-    let title = Paragraph::new("어휘 학습 TUI")
+    let title = Paragraph::new("jaturi")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -1251,7 +1252,7 @@ fn draw_main(frame: &mut Frame<'_>, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("어휘 학습 TUI"),
+                .title("jaturi"),
         );
 
     let current_progress = app.current_progress();
@@ -2049,7 +2050,19 @@ fn state_file_path() -> Result<PathBuf> {
         .or_else(dirs::data_dir)
         .ok_or_else(|| anyhow!("상태 저장 경로를 확인할 수 없습니다(OS 데이터 디렉터리 없음)"))?;
 
-    Ok(base_dir.join(STATE_DIR_NAME).join(STATE_FILE_NAME))
+    let current_path = base_dir.join(STATE_DIR_NAME).join(STATE_FILE_NAME);
+    if current_path.exists() {
+        return Ok(current_path);
+    }
+
+    let legacy_path = base_dir.join(LEGACY_STATE_DIR_NAME).join(STATE_FILE_NAME);
+    if !legacy_path.exists() {
+        return Ok(current_path);
+    }
+
+    let legacy_bytes = fs::read(&legacy_path).context("이전 상태 파일 읽기 실패")?;
+    atomic_write(&current_path, &legacy_bytes).context("이전 상태 파일 마이그레이션 실패")?;
+    Ok(current_path)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {

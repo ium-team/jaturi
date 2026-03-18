@@ -18,15 +18,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive: tar.gz
-            binary_name: vocab_tui
+            binary_name: jaturi
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
-            binary_name: vocab_tui
+            binary_name: jaturi
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
-            binary_name: vocab_tui.exe
+            binary_name: jaturi.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           BIN_NAME="${{ matrix.binary_name }}"
-          OUT_NAME="vocab_tui-${{ github.ref_name }}-${{ matrix.target }}"
+          OUT_NAME="jaturi-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
           cp README.md dist/README.md
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $BinName = "${{ matrix.binary_name }}"
-          $OutName = "vocab_tui-${{ github.ref_name }}-${{ matrix.target }}"
+          $OutName = "jaturi-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$BinName" "dist/$BinName"
           Copy-Item "README.md" "dist/README.md"
@@ -74,8 +74,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vocab_tui-${{ github.ref_name }}-${{ matrix.target }}
-          path: vocab_tui-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          name: jaturi-${{ github.ref_name }}-${{ matrix.target }}
+          path: jaturi-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
           if-no-files-found: error
 
   publish:
@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find dist -type f -name "vocab_tui-*" -exec cp {} release/ \;
+          find dist -type f -name "jaturi-*" -exec cp {} release/ \;
           ls -1 release
 
       - name: Verify expected assets exist
@@ -102,21 +102,21 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
-          test -f "release/vocab_tui-${TAG}-x86_64-unknown-linux-musl.tar.gz"
-          test -f "release/vocab_tui-${TAG}-aarch64-apple-darwin.tar.gz"
-          test -f "release/vocab_tui-${TAG}-x86_64-pc-windows-msvc.zip"
+          test -f "release/jaturi-${TAG}-x86_64-unknown-linux-musl.tar.gz"
+          test -f "release/jaturi-${TAG}-aarch64-apple-darwin.tar.gz"
+          test -f "release/jaturi-${TAG}-x86_64-pc-windows-msvc.zip"
 
       - name: Generate checksums
         shell: bash
         run: |
           set -euo pipefail
           cd release
-          sha256sum vocab_tui-* > SHA256SUMS.txt
+          sha256sum jaturi-* > SHA256SUMS.txt
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/vocab_tui-*.tar.gz
-            release/vocab_tui-*.zip
+            release/jaturi-*.tar.gz
+            release/jaturi-*.zip
             release/SHA256SUMS.txt
