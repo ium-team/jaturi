@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -75,7 +75,10 @@ fn default_learning_language() -> LearningLanguage {
 fn default_profile_name() -> String {
     env::var("HOSTNAME")
         .ok()
+        .or_else(|| env::var("COMPUTERNAME").ok())
         .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| env::var("USER").ok())
+        .or_else(|| env::var("USERNAME").ok())
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("localhost"))
         .unwrap_or_else(|| "학습자".to_string())
@@ -766,7 +769,7 @@ impl App {
     }
 
     fn start_quiz(&mut self) {
-        self.quiz_questions = build_quiz_questions(&self.words);
+        self.quiz_questions = build_quiz_questions(&self.words, self.learning_language);
         self.quiz_reviews.clear();
         self.quiz_index = 0;
         self.selected_option = 0;
@@ -883,10 +886,18 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
             }
         }
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            handle_key_event(key, &mut app, &tx).await;
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        handle_key_event(key, &mut app, &tx).await;
+                    }
+                }
+                Event::Paste(text) => {
+                    handle_paste_event(&text, &mut app);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1079,6 +1090,40 @@ async fn handle_key_event(
             }
             _ => {}
         },
+    }
+}
+
+fn strip_newlines(text: &str) -> String {
+    text.chars().filter(|ch| *ch != '\n' && *ch != '\r').collect()
+}
+
+fn handle_paste_event(text: &str, app: &mut App) {
+    let cleaned = strip_newlines(text);
+    if cleaned.is_empty() {
+        return;
+    }
+
+    match app.screen {
+        Screen::ApiKeySetup => {
+            if !app.setup_editing {
+                return;
+            }
+            match app.focused {
+                InputField::ApiKey => app.api_key.push_str(&cleaned),
+                InputField::ProfileName => app.profile_name.push_str(&cleaned),
+                InputField::LearningLanguage => {}
+            }
+        }
+        Screen::Quiz => {
+            let is_text = matches!(
+                app.current_quiz().map(|question| &question.answer),
+                Some(QuizAnswer::Text(_))
+            );
+            if is_text {
+                app.typed_answer.push_str(&cleaned);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1493,7 +1538,7 @@ fn draw_quiz(frame: &mut Frame<'_>, app: &App) {
             let answer = Paragraph::new(vec![
                 Line::from(format!("입력: {}", app.typed_answer)),
                 Line::from(" "),
-                Line::from("알파벳 입력 + Backspace, Enter 제출"),
+                Line::from("문자 입력(일본어/중국어 IME, 붙여넣기 지원) + Backspace, Enter 제출"),
             ])
             .block(Block::default().borders(Borders::ALL).title("Type Answer"))
             .wrap(Wrap { trim: true });
@@ -1673,15 +1718,22 @@ fn unique_meanings(words: &[WordItem], exclude_index: usize) -> Vec<String> {
     items
 }
 
-fn build_quiz_questions(words: &[WordItem]) -> Vec<QuizQuestion> {
+fn build_quiz_questions(words: &[WordItem], learning_language: LearningLanguage) -> Vec<QuizQuestion> {
     let mut rng = rand::rng();
     let mut questions = Vec::with_capacity(words.len());
 
     for (index, word) in words.iter().enumerate() {
-        let question_type = match rng.random_range(0..3) {
-            0 => QuizType::MeaningChoice,
-            1 => QuizType::FillBlankChoice,
-            _ => QuizType::SpellingWrite,
+        let question_type = if matches!(learning_language, LearningLanguage::Japanese | LearningLanguage::Chinese) {
+            match rng.random_range(0..2) {
+                0 => QuizType::MeaningChoice,
+                _ => QuizType::FillBlankChoice,
+            }
+        } else {
+            match rng.random_range(0..3) {
+                0 => QuizType::MeaningChoice,
+                1 => QuizType::FillBlankChoice,
+                _ => QuizType::SpellingWrite,
+            }
         };
 
         let question = match question_type {
@@ -1986,13 +2038,9 @@ async fn fetch_words_batch(
 }
 
 fn state_file_path() -> Result<PathBuf> {
-    let base_dir = if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg_data_home)
-    } else if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share")
-    } else {
-        bail!("상태 저장 경로를 확인할 수 없습니다(HOME/XDG_DATA_HOME 없음)")
-    };
+    let base_dir = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .ok_or_else(|| anyhow!("상태 저장 경로를 확인할 수 없습니다(OS 데이터 디렉터리 없음)"))?;
 
     Ok(base_dir.join(STATE_DIR_NAME).join(STATE_FILE_NAME))
 }
