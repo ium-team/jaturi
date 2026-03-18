@@ -33,7 +33,6 @@ git push origin v0.1.0
 
 - Linux(정적 링크): `vocab_tui-v0.1.0-x86_64-unknown-linux-musl.tar.gz`
 - macOS(Apple Silicon): `vocab_tui-v0.1.0-aarch64-apple-darwin.tar.gz`
-- macOS(Intel): `vocab_tui-v0.1.0-x86_64-apple-darwin.tar.gz`
 - Windows: `vocab_tui-v0.1.0-x86_64-pc-windows-msvc.zip`
 
 3. 압축 해제 후 실행

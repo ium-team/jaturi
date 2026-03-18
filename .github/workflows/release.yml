@@ -23,10 +23,6 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
             binary_name: vocab_tui
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
-            binary_name: vocab_tui
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
@@ -108,7 +104,6 @@ jobs:
           TAG="${{ github.ref_name }}"
           test -f "release/vocab_tui-${TAG}-x86_64-unknown-linux-musl.tar.gz"
           test -f "release/vocab_tui-${TAG}-aarch64-apple-darwin.tar.gz"
-          test -f "release/vocab_tui-${TAG}-x86_64-apple-darwin.tar.gz"
           test -f "release/vocab_tui-${TAG}-x86_64-pc-windows-msvc.zip"
 
       - name: Generate checksums
