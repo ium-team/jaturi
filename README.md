@@ -1,10 +1,10 @@
 # jaturi
 
-`jaturi`는 OpenAI를 사용해 단어를 자동 생성하고, 터미널에서 학습과 퀴즈를 진행하는 언어 학습 앱입니다.
+`jaturi`는 OpenAI 또는 Gemini를 사용해 단어를 자동 생성하고, 터미널에서 학습과 퀴즈를 진행하는 언어 학습 앱입니다.
 
 ## 이 서비스가 하는 일
 
-- API Key를 입력하면 AI가 학습 주제와 단어를 자동 생성
+- API Key를 입력하면 AI가 학습 주제와 단어를 자동 생성 (OpenAI/Gemini 자동 인식)
 - 최근 10개 주제와 겹치지 않는 새 주제를 우선 생성
 - 현재 언어 실력 + 앱 레벨을 반영해 단어 난이도를 조정
 - 단어 학습(뜻 확인) 후 바로 퀴즈로 복습
@@ -22,7 +22,7 @@
 ### Linux (x86_64)
 
 ```bash
-VERSION="v0.1.7"
+VERSION="v0.1.8"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "jaturi-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 chmod +x install.sh
@@ -34,7 +34,7 @@ jaturi
 ### macOS (Apple Silicon)
 
 ```bash
-VERSION="v0.1.7"
+VERSION="v0.1.8"
 curl -LO "https://github.com/ium-team/jaturi/releases/download/${VERSION}/jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf "jaturi-${VERSION}-aarch64-apple-darwin.tar.gz"
 chmod +x install.sh
@@ -46,7 +46,7 @@ jaturi
 ### Windows (x86_64, PowerShell)
 
 ```powershell
-$Version = "v0.1.7"
+$Version = "v0.1.8"
 Invoke-WebRequest -Uri "https://github.com/ium-team/jaturi/releases/download/$Version/jaturi-$Version-x86_64-pc-windows-msvc.zip" -OutFile "jaturi-$Version-x86_64-pc-windows-msvc.zip"
 Expand-Archive -Path "jaturi-$Version-x86_64-pc-windows-msvc.zip" -DestinationPath "." -Force
 .\install.ps1
@@ -73,7 +73,7 @@ Linux 예시:
 
 ```bash
 sha256sum ~/.local/bin/jaturi
-curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.7/SHA256SUMS.txt
+curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.8/SHA256SUMS.txt
 ```
 
 버전이 다르면 같은 폴더(압축 해제 폴더)에서 `./install.sh` 또는 `./install.ps1`를 다시 실행해 덮어설치하세요.
@@ -83,6 +83,7 @@ curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.7/SHA256SUMS.t
 ### 1) 처음 실행
 
 - `API Key`, `이름`, `학습 언어`를 입력하고 `S`로 저장
+- API Key 형식으로 OpenAI/Gemini를 자동 구분해 사용
 - 저장 후 메인 화면으로 이동
 
 ### 2) 주제 생성
@@ -114,7 +115,7 @@ curl -L https://github.com/ium-team/jaturi/releases/download/v0.1.7/SHA256SUMS.t
 
 ## 키 조작 요약
 
-- 공통: `Esc` 종료 (`학습`/`퀴즈` 화면에서는 중간 취소 후 메인 복귀)
+- 공통: `Esc` 메인 이동 (`메인` 화면에서만 `Esc` 종료)
 - 설정 화면: `Up/Down`, `Tab` 이동, `Enter` 편집 시작/종료, `S` 저장
 - 메인 화면: `N` 새 주제, `S`/`Enter` 학습, `Q` 퀴즈, `K` 설정
 - 주제 생성: `Enter` 생성 시작, `M` 메인 복귀

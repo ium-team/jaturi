@@ -90,6 +90,53 @@ struct GenerationPayload {
     words: Vec<WordItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiProvider {
+    OpenAi,
+    Gemini,
+}
+
+impl AiProvider {
+    fn detect(api_key: &str) -> Self {
+        let trimmed = api_key.trim();
+        if let Some((prefix, _)) = trimmed.split_once(':') {
+            if prefix.eq_ignore_ascii_case("gemini") {
+                return Self::Gemini;
+            }
+            if prefix.eq_ignore_ascii_case("openai") {
+                return Self::OpenAi;
+            }
+        }
+
+        if trimmed.starts_with("AIza") {
+            Self::Gemini
+        } else {
+            Self::OpenAi
+        }
+    }
+
+    fn display_name_ko(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Gemini => "Gemini",
+        }
+    }
+}
+
+fn normalized_api_key_and_provider(api_key: &str) -> (AiProvider, &str) {
+    let trimmed = api_key.trim();
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        let rest = rest.trim();
+        if prefix.eq_ignore_ascii_case("gemini") && !rest.is_empty() {
+            return (AiProvider::Gemini, rest);
+        }
+        if prefix.eq_ignore_ascii_case("openai") && !rest.is_empty() {
+            return (AiProvider::OpenAi, rest);
+        }
+    }
+    (AiProvider::detect(trimmed), trimmed)
+}
+
 #[derive(Debug, Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
@@ -298,6 +345,8 @@ struct App {
     total_xp: u32,
     message: String,
     pending_persist: bool,
+    next_generation_request_id: u64,
+    active_generation_request_id: Option<u64>,
     quit: bool,
 }
 
@@ -324,6 +373,8 @@ impl Default for App {
             total_xp: 0,
             message: "API Key, 사용자 이름, 언어를 설정하고 Enter를 누르세요".to_string(),
             pending_persist: false,
+            next_generation_request_id: 1,
+            active_generation_request_id: None,
             quit: false,
         }
     }
@@ -972,28 +1023,42 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
             app.message = format!("저장된 학습 기록을 불러오지 못했습니다: {err}");
         }
     }
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<GenerationResult>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, Result<GenerationResult>)>();
 
     while !app.quit {
         terminal.draw(|frame| draw(frame, &app))?;
 
-        if app.screen == Screen::Loading {
+        loop {
             match rx.try_recv() {
-                Ok(result) => match result {
-                    Ok(output) => {
-                        if let Some(index) = app.save_topic(output.topic, output.words) {
-                            app.start_study_for(index);
+                Ok((request_id, result)) => {
+                    if app.active_generation_request_id != Some(request_id) {
+                        continue;
+                    }
+                    app.active_generation_request_id = None;
+
+                    if app.screen != Screen::Loading {
+                        continue;
+                    }
+
+                    match result {
+                        Ok(output) => {
+                            if let Some(index) = app.save_topic(output.topic, output.words) {
+                                app.start_study_for(index);
+                            }
+                        }
+                        Err(err) => {
+                            app.screen = Screen::Error;
+                            app.message = format!("생성 실패: {err}");
                         }
                     }
-                    Err(err) => {
-                        app.screen = Screen::Error;
-                        app.message = format!("생성 실패: {err}");
-                    }
-                },
-                Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    app.screen = Screen::Error;
-                    app.message = "내부 채널이 끊어졌습니다".to_string();
+                    if app.screen == Screen::Loading {
+                        app.screen = Screen::Error;
+                        app.message = "내부 채널이 끊어졌습니다".to_string();
+                    }
+                    break;
                 }
             }
         }
@@ -1024,25 +1089,30 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
 async fn handle_key_event(
     key: KeyEvent,
     app: &mut App,
-    tx: &mpsc::UnboundedSender<Result<GenerationResult>>,
+    tx: &mpsc::UnboundedSender<(u64, Result<GenerationResult>)>,
 ) {
     if key.code == KeyCode::Esc {
         match app.screen {
+            Screen::Main => {
+                if app.flush_pending_save() {
+                    app.quit = true;
+                }
+            }
             Screen::Study => {
                 app.cancel_study();
-                return;
             }
             Screen::Quiz => {
                 app.cancel_quiz();
-                return;
             }
-            _ => {}
-        }
-    }
-
-    if key.code == KeyCode::Esc {
-        if app.flush_pending_save() {
-            app.quit = true;
+            Screen::Loading => {
+                app.active_generation_request_id = None;
+                app.start_main();
+                app.message = "생성을 취소하고 메인으로 돌아왔습니다.".to_string();
+            }
+            _ => {
+                app.start_main();
+                app.message = "메인으로 돌아왔습니다.".to_string();
+            }
         }
         return;
     }
@@ -1094,7 +1164,11 @@ async fn handle_key_event(
                 }
 
                 app.screen = Screen::Loading;
-                app.message = "OpenAI에서 단어를 생성하는 중...".to_string();
+                let provider = AiProvider::detect(&app.api_key);
+                app.message = format!("{}에서 단어를 생성하는 중...", provider.display_name_ko());
+                let request_id = app.next_generation_request_id;
+                app.next_generation_request_id = app.next_generation_request_id.saturating_add(1);
+                app.active_generation_request_id = Some(request_id);
 
                 let api_key = app.api_key.clone();
                 let excluded_terms = app.known_terms();
@@ -1114,7 +1188,7 @@ async fn handle_key_event(
                         learning_language,
                     )
                     .await;
-                    let _ = tx.send(result);
+                    let _ = tx.send((request_id, result));
                 });
             }
             KeyCode::Char('m') | KeyCode::Char('M') => app.start_main(),
@@ -1294,7 +1368,7 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("초기 설정"));
 
     let api_value = if app.api_key.is_empty() {
-        "(input your OpenAI API key)".to_string()
+        "(input your OpenAI or Gemini API key)".to_string()
     } else {
         "*".repeat(app.api_key.len().min(40))
     };
@@ -1343,7 +1417,7 @@ fn draw_api_key_setup(frame: &mut Frame<'_>, app: &App) {
         Line::from("Enter: 선택 항목 편집 시작/종료"),
         Line::from("S: 설정 저장 후 메인 이동"),
         Line::from("(언어 편집 중 Left/Right, H/L 사용 가능)"),
-        Line::from("Esc: 종료"),
+        Line::from("Esc: 메인으로 이동"),
         Line::from(app.message.clone()),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1517,7 +1591,7 @@ fn draw_topic_create(frame: &mut Frame<'_>, app: &App) {
     let help = Paragraph::new(vec![
         Line::from("Enter: AI 생성 시작"),
         Line::from("M: 메인으로 이동"),
-        Line::from("Esc: 종료"),
+        Line::from("Esc: 메인으로 이동"),
         Line::from(app.message.clone()),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1532,7 +1606,7 @@ fn draw_loading(frame: &mut Frame<'_>, app: &App) {
     let popup = centered_rect(60, 20, frame.area());
     frame.render_widget(Clear, popup);
     let loading = Paragraph::new(vec![
-        Line::from("OpenAI로 단어를 생성하는 중입니다."),
+        Line::from("AI로 단어를 생성하는 중입니다."),
         Line::from("잠시만 기다려 주세요..."),
         Line::from(" "),
         Line::from(app.message.clone()),
@@ -1733,7 +1807,7 @@ fn draw_result(frame: &mut Frame<'_>, app: &App) {
         Line::from("M: 메인으로 이동"),
         Line::from("S: 다시 학습하기"),
         Line::from("Q: 다시 시험보기"),
-        Line::from("Esc: 종료"),
+        Line::from("Esc: 메인으로 이동"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Actions"))
     .wrap(Wrap { trim: true });
@@ -1753,6 +1827,7 @@ fn draw_error(frame: &mut Frame<'_>, app: &App) {
         Line::from(" "),
         Line::from("R: 돌아가기"),
         Line::from("Q: 종료"),
+        Line::from("Esc: 메인으로 이동"),
     ])
     .style(Style::default().fg(Color::Red))
     .block(Block::default().borders(Borders::ALL).title("Error"))
@@ -2114,35 +2189,44 @@ async fn fetch_words_batch(
     recent_topics: &[String],
     learning_language: LearningLanguage,
 ) -> Result<GenerationPayload> {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "topic": {
-                "type": "string",
-                "minLength": 1
-            },
-            "words": {
-                "type": "array",
-                "minItems": count,
-                "maxItems": count,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "term": {
-                            "type": "string",
-                            "minLength": 1
-                        },
-                        "meaning_ko": {"type": "string"}
-                    },
-                    "required": ["term", "meaning_ko"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["topic", "words"],
-        "additionalProperties": false
-    });
+    let (provider, normalized_api_key) = normalized_api_key_and_provider(api_key);
 
+    match provider {
+        AiProvider::OpenAi => {
+            fetch_words_batch_openai(
+                normalized_api_key,
+                count,
+                language_skill,
+                current_level,
+                fixed_topic,
+                recent_topics,
+                learning_language,
+            )
+            .await
+        }
+        AiProvider::Gemini => {
+            fetch_words_batch_gemini(
+                normalized_api_key,
+                count,
+                language_skill,
+                current_level,
+                fixed_topic,
+                recent_topics,
+                learning_language,
+            )
+            .await
+        }
+    }
+}
+
+fn build_generation_prompts(
+    count: usize,
+    language_skill: u32,
+    current_level: u32,
+    fixed_topic: Option<&str>,
+    recent_topics: &[String],
+    learning_language: LearningLanguage,
+) -> Result<(String, String)> {
     let recent_topics_json =
         serde_json::to_string(recent_topics).context("최근 주제 직렬화 실패")?;
     let topic_instruction = if let Some(topic) = fixed_topic {
@@ -2174,6 +2258,56 @@ async fn fetch_words_batch(
         LearningLanguage::topic_language_name(),
         learning_language.term_language_name(),
     );
+
+    Ok((system_prompt, user_prompt))
+}
+
+async fn fetch_words_batch_openai(
+    api_key: &str,
+    count: usize,
+    language_skill: u32,
+    current_level: u32,
+    fixed_topic: Option<&str>,
+    recent_topics: &[String],
+    learning_language: LearningLanguage,
+) -> Result<GenerationPayload> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "topic": {
+                "type": "string",
+                "minLength": 1
+            },
+            "words": {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "term": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "meaning_ko": {"type": "string"}
+                    },
+                    "required": ["term", "meaning_ko"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["topic", "words"],
+        "additionalProperties": false
+    });
+
+    let (system_prompt, user_prompt) = build_generation_prompts(
+        count,
+        language_skill,
+        current_level,
+        fixed_topic,
+        recent_topics,
+        learning_language,
+    )?;
 
     let request_body = ChatCompletionRequest {
         model: "gpt-4o-mini",
@@ -2235,6 +2369,104 @@ async fn fetch_words_batch(
             payload.words.len()
         );
     }
+    Ok(payload)
+}
+
+fn extract_json_text(content: &str) -> &str {
+    let trimmed = content.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        let stripped = stripped.trim_start();
+        let stripped = if let Some(after_lang) = stripped.strip_prefix("json") {
+            after_lang
+        } else {
+            stripped
+        };
+        let stripped = stripped.trim_start_matches(['\n', '\r']);
+        if let Some(end) = stripped.rfind("```") {
+            return stripped[..end].trim();
+        }
+    }
+    trimmed
+}
+
+async fn fetch_words_batch_gemini(
+    api_key: &str,
+    count: usize,
+    language_skill: u32,
+    current_level: u32,
+    fixed_topic: Option<&str>,
+    recent_topics: &[String],
+    learning_language: LearningLanguage,
+) -> Result<GenerationPayload> {
+    const GEMINI_MODEL: &str = "gemini-2.0-flash-lite";
+
+    let (system_prompt, user_prompt) = build_generation_prompts(
+        count,
+        language_skill,
+        current_level,
+        fixed_topic,
+        recent_topics,
+        learning_language,
+    )?;
+
+    let request_body = serde_json::json!({
+        "systemInstruction": {
+            "parts": [{ "text": system_prompt }]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{ "text": user_prompt }]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .query(&[("key", api_key)])
+        .json(&request_body)
+        .send()
+        .await
+        .context("Gemini 요청 실패")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "응답 본문 읽기 실패".to_string());
+        bail!("Gemini API 오류({status}): {body}");
+    }
+
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .context("Gemini 응답 JSON 파싱 실패")?;
+
+    let text = value
+        .pointer("/candidates/0/content/parts/0/text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Gemini 응답에 text가 없습니다"))?;
+
+    let payload_text = extract_json_text(text);
+    let payload: GenerationPayload =
+        serde_json::from_str(payload_text).context("단어 JSON 파싱 실패")?;
+    if payload.words.len() != count {
+        bail!(
+            "요청한 단어 수와 응답 단어 수가 다릅니다: 요청 {count}, 응답 {}",
+            payload.words.len()
+        );
+    }
+
     Ok(payload)
 }
 
